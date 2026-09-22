@@ -1,0 +1,8 @@
+thundercloud
+dist-newstyle/
+cabal.project.local
+.ghc.environment.*
+*.hi
+*.o
+*.exe
+*.tmp

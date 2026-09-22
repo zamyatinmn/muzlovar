@@ -1,0 +1,23 @@
+{
+  "all": [
+    {
+      "is": {
+        "loved": true
+      }
+    },
+    {
+      "gt": {
+        "playcount": 2
+      }
+    },
+    {
+      "notInTheLast": {
+        "lastplayed": 90
+      }
+    }
+  ],
+  "comment": "Любимые треки, которые давно не звучали",
+  "limit": 100,
+  "name": "Забытое любимое",
+  "sort": "random"
+}

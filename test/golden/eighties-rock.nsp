@@ -1,0 +1,34 @@
+{
+  "all": [
+    {
+      "inTheRange": {
+        "year": [
+          1980,
+          1989
+        ]
+      }
+    },
+    {
+      "contains": {
+        "genre": "rock"
+      }
+    },
+    {
+      "any": [
+        {
+          "is": {
+            "loved": true
+          }
+        },
+        {
+          "gt": {
+            "rating": 3
+          }
+        }
+      ]
+    }
+  ],
+  "limit": 200,
+  "name": "Рок восьмидесятых",
+  "sort": "-year,-rating,title"
+}

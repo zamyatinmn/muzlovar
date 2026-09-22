@@ -1,0 +1,24 @@
+{
+  "all": [
+    {
+      "is": {
+        "loved": true
+      }
+    },
+    {
+      "gt": {
+        "playcount": 10
+      }
+    },
+    {
+      "isNot": {
+        "rating": 1
+      }
+    }
+  ],
+  "comment": "Любимые треки с высоким числом прослушиваний",
+  "limit": 150,
+  "name": "Любимые хиты",
+  "public": true,
+  "sort": "-playcount"
+}

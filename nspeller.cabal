@@ -1,0 +1,82 @@
+cabal-version:      3.0
+name:               nspeller
+version:            0.1.0.0
+synopsis:           Компилятор умных подборок Navidrome из файлов .mix
+description:        nspeller компилирует человекочитаемые правила умных музыкальных
+                    подборок из файлов .mix в JSON-файлы .nsp, которые поддерживает
+                    Navidrome Smart Playlists.
+license:            MIT
+license-file:       LICENSE
+author:             nspeller contributors
+maintainer:         nspeller contributors
+category:           Music
+build-type:         Simple
+extra-doc-files:    README.md
+
+common warnings
+  ghc-options:
+      -Wall
+      -Wcompat
+      -Widentities
+      -Wincomplete-record-updates
+      -Wincomplete-uni-patterns
+      -Wmissing-export-lists
+      -Wredundant-constraints
+  default-language: GHC2021
+
+library
+  import:           warnings
+  hs-source-dirs:   src
+  exposed-modules:
+      Nspeller.Ast
+      Nspeller.Cli
+      Nspeller.Compiler
+      Nspeller.Navidrome
+      Nspeller.Parser
+      Nspeller.Validation
+
+  build-depends:
+      aeson
+    , aeson-pretty
+    , base >=4.17 && <5
+    , bytestring
+    , directory
+    , filepath
+    , megaparsec >=9.0
+    , optparse-applicative >=0.16
+    , text
+    , time
+
+executable nspeller
+  import:           warnings
+  hs-source-dirs:   app
+  main-is:          Main.hs
+  ghc-options:      -threaded
+  build-depends:
+      base
+    , nspeller
+
+test-suite nspeller-test
+  import:           warnings
+  type:             exitcode-stdio-1.0
+  hs-source-dirs:   test
+  main-is:          Main.hs
+  other-modules:
+      Generators
+      GoldenTests
+      Properties
+      UnitTests
+
+  build-depends:
+      aeson
+    , base
+    , bytestring
+    , filepath
+    , nspeller
+    , QuickCheck >=2.14
+    , tasty
+    , tasty-golden
+    , tasty-hunit
+    , tasty-quickcheck
+    , text
+    , time

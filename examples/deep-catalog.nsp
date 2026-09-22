@@ -1,0 +1,37 @@
+{
+  "all": [
+    {
+      "lt": {
+        "year": 2000
+      }
+    },
+    {
+      "is": {
+        "hascoverart": true
+      }
+    },
+    {
+      "isPresent": {
+        "rgtrackgain": true
+      }
+    },
+    {
+      "any": [
+        {
+          "startsWith": {
+            "genre": "progressive"
+          }
+        },
+        {
+          "contains": {
+            "genre": "psyched"
+          }
+        }
+      ]
+    }
+  ],
+  "comment": "Старые релизы с обложкой и ReplayGain",
+  "limit": 300,
+  "name": "Глубокий каталог",
+  "sort": "year,title"
+}

@@ -1,0 +1,23 @@
+{
+  "all": [
+    {
+      "inTheLast": {
+        "dateadded": 14
+      }
+    },
+    {
+      "lt": {
+        "playcount": 2
+      }
+    },
+    {
+      "notInTheLast": {
+        "lastplayed": 3
+      }
+    }
+  ],
+  "comment": "Добавлено за две недели и почти не звучало",
+  "limit": 40,
+  "name": "Свежее и непрослушанное",
+  "sort": "random"
+}
