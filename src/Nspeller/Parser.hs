@@ -195,6 +195,14 @@ notPlayedP =
     *> (RNotPlayed <$> intP)
     <* kw "дней"
 
+-- | Начало формы @не звучало N дней@ — только проверка, без разбора.
+-- Пробелы и переводы строк — значимы лишь как разделители, поэтому
+-- после «чистого» булева условия его лексема переносит позицию на
+-- следующую строку: если та начинается с @не звучало@, это СЛЕДУЮЩЕЕ
+-- условие, а не оператор «не содержит» у предыдущего.
+notPlayedAhead :: Parser ()
+notPlayedAhead = kw "не" *> kw "звучало"
+
 condP :: Parser RawCond
 condP = do
   name <- ident
@@ -202,12 +210,19 @@ condP = do
 
 -- | Операторы после имени поля. Многословные операторы фиксируются
 -- после первого слова: это даёт точные ошибки вроде
--- «ожидается содержит» вместо догадок о намерении.
+-- «ожидается содержит» вместо догадок о намерении. Единственное
+-- исключение — «не» в начале формы @не звучало@ (см.
+-- 'notPlayedAhead'): её нельзя принимать за начало «не содержит».
 condAfterFieldP :: Text -> Parser RawCond
 condAfterFieldP name =
   MP.choice
     [ RBetween name <$> (kw "между" *> intP) <*> (kw "и" *> intP)
-    , RBin name OpNotContains <$> (kw "не" *> kw "содержит" *> valueP)
+    , RBin name OpNotContains
+        <$> ( MP.notFollowedBy notPlayedAhead
+                *> kw "не"
+                *> kw "содержит"
+                *> valueP
+            )
     , RBin name OpStartsWith <$> (kw "начинается" *> kw "с" *> valueP)
     , RBin name OpEndsWith <$> (kw "заканчивается" *> kw "на" *> valueP)
     , RBin name OpContains <$> (kw "содержит" *> valueP)

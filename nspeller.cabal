@@ -4,7 +4,8 @@ version:            0.1.0.0
 synopsis:           Компилятор умных подборок Navidrome из файлов .mix
 description:        nspeller компилирует человекочитаемые правила умных музыкальных
                     подборок из файлов .mix в JSON-файлы .nsp, которые поддерживает
-                    Navidrome Smart Playlists.
+                    Navidrome Smart Playlists. В пакет также входит Muzlovar —
+                    веб-редактор умных подборок поверх того же ядра.
 license:            MIT
 license-file:       LICENSE
 author:             nspeller contributors
@@ -33,19 +34,39 @@ library
       Nspeller.Compiler
       Nspeller.Navidrome
       Nspeller.Parser
+      Nspeller.Render
+      Nspeller.Schema
       Nspeller.Validation
+      Nspeller.Muzlovar.Assets
+      Nspeller.Muzlovar.Html
+      Nspeller.Muzlovar.Server
+      Nspeller.Muzlovar.Store
+      Nspeller.Muzlovar.Subsonic
+      Nspeller.Muzlovar.Types
 
   build-depends:
       aeson
     , aeson-pretty
     , base >=4.17 && <5
+    , base64-bytestring
     , bytestring
     , directory
+    , file-embed
     , filepath
+    , http-client
+    , http-client-tls
+    , http-types
+    , lucid
     , megaparsec >=9.0
     , optparse-applicative >=0.16
+    , scotty >=0.30
     , text
     , time
+    , wai
+    , warp
+
+  if !os(windows)
+    build-depends: unix
 
 executable nspeller
   import:           warnings
@@ -56,22 +77,43 @@ executable nspeller
       base
     , nspeller
 
+executable muzlovar
+  import:           warnings
+  hs-source-dirs:   muzlovar
+  main-is:          Main.hs
+  ghc-options:      -threaded -rtsopts "-with-rtsopts=-N"
+  build-depends:
+      base
+    , nspeller
+    , text
+    , warp
+
+  if !os(windows)
+    build-depends: unix
+
 test-suite nspeller-test
   import:           warnings
   type:             exitcode-stdio-1.0
   hs-source-dirs:   test
   main-is:          Main.hs
   other-modules:
+      DtoTests
       Generators
       GoldenTests
       Properties
+      RoundTripTests
+      SchemaTests
+      ServerTests
+      StoreTests
       UnitTests
 
   build-depends:
       aeson
     , base
     , bytestring
+    , directory
     , filepath
+    , http-types
     , nspeller
     , QuickCheck >=2.14
     , tasty
@@ -80,3 +122,5 @@ test-suite nspeller-test
     , tasty-quickcheck
     , text
     , time
+    , wai
+    , wai-extra

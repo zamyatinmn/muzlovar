@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Golden-тесты: полные сценарии @.mix → .nsp@ сравниваются с
+-- | Golden-тесты: полные сценарии @.mix -> .nsp@ сравниваются с
 -- эталонными файлами байт-в-байт. Это же фиксирует детерминированность
 -- сериализации (порядок и форматирование ключей) между запусками.
 module GoldenTests (goldenTests) where
@@ -19,7 +19,7 @@ import Test.Tasty.Golden (goldenVsString)
 goldenDir :: FilePath
 goldenDir = "test" </> "golden"
 
--- | Один сценарий: @test\/golden\/NAME.mix@ → сравнение с
+-- | Один сценарий: @test\/golden\/NAME.mix@ -> сравнение с
 -- @test\/golden\/NAME.nsp@.
 goldenMix :: String -> TestTree
 goldenMix name = goldenVsString name (goldenDir </> name <.> "nsp") action

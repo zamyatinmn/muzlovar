@@ -1,0 +1,36 @@
+# Пример запуска Muzlovar рядом с Navidrome.
+#
+# /playlists монтируется в каталог PlaylistsPath вашего Navidrome,
+# чтобы опубликованные .nsp подхватывались при сканировании.
+#
+# Авторизация опциональна: задайте ОБЕ переменные MUZLOVAR_USERNAME и
+# MUZLOVAR_PASSWORD — включится Basic Auth; закомментируйте обе (или
+# не задавайте) — сервис откроется без авторизации (для закрытой
+# внутренней сети). Задана только одна — приложение не стартует.
+services:
+  muzlovar:
+    build: .
+    image: nspeller-muzlovar:latest
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    environment:
+      MUZLOVAR_PORT: "8765"
+      # Basic Auth (раскомментируйте обе строки, чтобы включить):
+      # MUZLOVAR_USERNAME: admin
+      # MUZLOVAR_PASSWORD: change-me
+      # Честный статус удаления сущности в Navidrome (необязательно):
+      # MUZLOVAR_SUBSONIC_URL: http://navidrome:4533
+      # MUZLOVAR_SUBSONIC_USER: subsonic-user
+      # MUZLOVAR_SUBSONIC_PASSWORD: subsonic-password
+    volumes:
+      - ./data/rules:/rules
+      # В рабочем окружении — каталог PlaylistsPath Navidrome:
+      - ./data/playlists:/playlists
+      - ./data/trash:/trash
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8765/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

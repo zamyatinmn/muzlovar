@@ -1,0 +1,8 @@
+.git
+.gitignore
+dist-newstyle
+thundercloud
+data
+Dockerfile
+docker-compose.yaml
+.dockerignore

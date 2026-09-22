@@ -1,8 +1,14 @@
--- | Единый набор тестов nspeller: unit, golden и property-based.
+-- | Единый набор тестов nspeller: unit, golden, property-based
+-- и тесты веб-приложения Muzlovar.
 module Main (main) where
 
+import DtoTests (dtoTests)
 import GoldenTests (goldenTests)
 import Properties (propertyTests)
+import RoundTripTests (roundTripTests)
+import SchemaTests (schemaTests)
+import ServerTests (serverTests)
+import StoreTests (storeTests)
 import Test.Tasty (defaultMain, testGroup)
 import UnitTests (unitTests)
 
@@ -14,4 +20,9 @@ main =
       [ unitTests
       , propertyTests
       , goldenTests
+      , dtoTests
+      , roundTripTests
+      , schemaTests
+      , storeTests
+      , serverTests
       ]

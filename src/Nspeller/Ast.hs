@@ -34,9 +34,11 @@ module Nspeller.Ast
   , fieldName
   , fieldValueType
   , fieldByName
+  , fieldDslName
   , fieldPresence
   , PresenceField (..)
   , presenceFieldName
+  , presenceFieldDslName
   , presenceValueType
   , boolFieldNames
 
@@ -71,6 +73,7 @@ module Nspeller.Ast
   , SortItem (..)
   , sortFieldName
   , sortFieldByName
+  , sortFieldDslName
 
     -- * Ошибки компиляции
   , CompileError (..)
@@ -249,22 +252,26 @@ fieldByName name =
       , SomeField LastPlayed
       , SomeField DateAdded
       ]
-    matches sf@(SomeField f) = name == fieldName f || name == dslName sf
-    -- Русские имена полей из DSL:
-    dslName :: SomeField -> Text
-    dslName (SomeField f) = case f of
-      Title -> "название"
-      Album -> "альбом"
-      Genre -> "жанр"
-      ExplicitStatus -> "explicit"
-      Year -> "год"
-      Rating -> "оценка"
-      PlayCount -> "прослушиваний"
-      RGTrackGain -> "replaygain"
-      Loved -> "любимое"
-      HasCoverArt -> "обложка"
-      LastPlayed -> "последнее_прослушивание"
-      DateAdded -> "добавлено"
+    matches (SomeField f) = name == fieldName f || name == fieldDslName f
+
+-- | Имя поля в DSL (русские и транслитерированные имена).
+--
+-- Обратная операция к 'fieldByName': принимает любое имя, которое
+-- парсер уже 인정ил для данного поля.
+fieldDslName :: Field a -> Text
+fieldDslName = \case
+  Title -> "название"
+  Album -> "альбом"
+  Genre -> "жанр"
+  ExplicitStatus -> "explicit"
+  Year -> "год"
+  Rating -> "оценка"
+  PlayCount -> "прослушиваний"
+  RGTrackGain -> "replaygain"
+  Loved -> "любимое"
+  HasCoverArt -> "обложка"
+  LastPlayed -> "последнее_прослушивание"
+  DateAdded -> "добавлено"
 
 -- | Поля, поддерживающие операторы 'Absent'/'Present'
 -- (согласно документации Navidrome: теговые и текстовые поля,
@@ -300,6 +307,17 @@ presenceValueType = \case
   PGenre -> TextType
   PExplicitStatus -> TextType
   PRGTrackGain -> NumberType
+
+-- | Имя поля, поддерживающего проверку наличия, в DSL.
+--
+-- Совпадает с 'fieldDslName' соответствующего поля: @альбом@,
+-- @жанр@, @explicit@, @replaygain@.
+presenceFieldDslName :: PresenceField -> Text
+presenceFieldDslName = \case
+  PAlbum -> fieldDslName Album
+  PGenre -> fieldDslName Genre
+  PExplicitStatus -> fieldDslName ExplicitStatus
+  PRGTrackGain -> fieldDslName RGTrackGain
 
 -- | Имена булевых полей в DSL (запрещены в сортировке).
 boolFieldNames :: [Text]
@@ -529,23 +547,25 @@ sortFieldName = \case
 -- сортировать по ним, а валидация даёт отдельное сообщение.
 sortFieldByName :: Text -> Maybe SortField
 sortFieldByName name =
-  case find (\sf -> name == sortFieldName sf || name == dslName sf) candidates of
+  case find (\sf -> name == sortFieldName sf || name == sortFieldDslName sf) candidates of
     Just sf -> Just sf
     Nothing -> Nothing
   where
     candidates = [minBound .. maxBound] :: [SortField]
-    dslName :: SortField -> Text
-    dslName = \case
-      SFTitle -> "название"
-      SFAlbum -> "альбом"
-      SFGenre -> "жанр"
-      SFYear -> "год"
-      SFRating -> "оценка"
-      SFPlayCount -> "прослушиваний"
-      SFLastPlayed -> "последнее_прослушивание"
-      SFDateAdded -> "добавлено"
-      SFExplicitStatus -> "explicit"
-      SFReplayGain -> "replaygain"
+
+-- | Имя поля сортировки в DSL.
+sortFieldDslName :: SortField -> Text
+sortFieldDslName = \case
+  SFTitle -> "название"
+  SFAlbum -> "альбом"
+  SFGenre -> "жанр"
+  SFYear -> "год"
+  SFRating -> "оценка"
+  SFPlayCount -> "прослушиваний"
+  SFLastPlayed -> "последнее_прослушивание"
+  SFDateAdded -> "добавлено"
+  SFExplicitStatus -> "explicit"
+  SFReplayGain -> "replaygain"
 
 ------------------------------------------------------------------------------
 -- Ошибки компиляции
