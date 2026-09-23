@@ -128,6 +128,15 @@ schemaStructure = testCase "структура /api/schema" $ case schemaJson of
     -- группы и направления сортировки
     map (textAt "id") (arrayAt "groupKinds" schemaJson) @?= ["all", "any"]
     map (textAt "id") (arrayAt "sortDirections" schemaJson) @?= ["asc", "desc"]
+    -- группы ингредиентов палитры: имя, порядок и принадлежность полей
+    let ingredientIds = map (textAt "id") (arrayAt "ingredientGroups" schemaJson)
+    ingredientIds @?= ["logic", "history", "meta"]
+    map (textAt "name") (arrayAt "ingredientGroups" schemaJson)
+      @?= ["Логика", "История", "Метаданные"]
+    forM_ fields $ \f ->
+      assertBool
+        ("поле " <> T.unpack (textAt "id" f) <> " не отнесено к группе ингредиентов")
+        (textAt "group" f `elem` ingredientIds)
     -- персональные поля
     personal @?= ["любимое", "оценка", "прослушиваний", "последнее_прослушивание"]
     assertBool

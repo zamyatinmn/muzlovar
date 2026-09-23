@@ -12,7 +12,9 @@
 --
 -- Соответствие «поле × оператор × значение» совпадает с
 -- 'Nspeller.Validation.validatePlaylist' и закреплено тестами
--- (SchemaTests).
+-- (SchemaTests). Группы ингредиентов ('ingredientGroupSchemas')
+-- приходят вместе со схемой: фронтенд не хранит собственных списков
+-- полей и групп.
 module Nspeller.Schema
   ( schemaJson
   , FieldSchema (..)
@@ -43,6 +45,8 @@ data FieldSchema = FieldSchema
   -- ^ Имя поля в JSON Navidrome (.nsp).
   , fsTitle :: Text
   -- ^ Русское название для интерфейса.
+  , fsGroup :: Text
+  -- ^ Группа ингредиентов в палитре (см. 'ingredientGroupSchemas').
   , fsValueType :: ValueType
   , fsSortable :: Bool
   , fsPresenceCapable :: Bool
@@ -76,6 +80,7 @@ instance Aeson.ToJSON FieldSchema where
       [ "id" .= fsId fs
       , "nspName" .= fsNspName fs
       , "title" .= fsTitle fs
+      , "group" .= fsGroup fs
       , "valueType" .= valueTypeJson (fsValueType fs)
       , "sortable" .= fsSortable fs
       , "presence" .= fsPresenceCapable fs
@@ -107,6 +112,20 @@ operatorSchemas =
   ]
 
 ------------------------------------------------------------------------------
+-- Группы ингредиентов
+------------------------------------------------------------------------------
+
+-- | Группы палитры в порядке отображения: @id@ — ключ в 'fsGroup',
+-- @name@ — заголовок в интерфейсе. Список полей при этом остаётся
+-- единым (порядок DSL-палитры), группировка — только подстановка.
+ingredientGroupSchemas :: [(Text, Text)]
+ingredientGroupSchemas =
+  [ ("logic", "Логика")
+  , ("history", "История")
+  , ("meta", "Метаданные")
+  ]
+
+------------------------------------------------------------------------------
 -- Поля
 ------------------------------------------------------------------------------
 
@@ -132,36 +151,37 @@ dateOps _ = ["inTheLast"]
 -- 'Field' — здесь заданы только русские названия для интерфейса.
 fieldSchemas :: [FieldSchema]
 fieldSchemas =
-  [ flag Loved "Любимое"
-  , num Rating "Оценка"
-  , num PlayCount "Прослушивания"
-  , date LastPlayed "Последнее прослушивание"
-  , date DateAdded "Добавлено"
-  , txt Title "Название"
-  , txt Album "Альбом"
-  , txt Genre "Жанр"
-  , num Year "Год"
-  , txt ExplicitStatus "Explicit"
-  , flag HasCoverArt "Обложка"
-  , num RGTrackGain "ReplayGain"
+  [ flag Loved "logic" "Любимое"
+  , num Rating "logic" "Оценка"
+  , num PlayCount "history" "Прослушивания"
+  , date LastPlayed "history" "Последнее прослушивание"
+  , date DateAdded "history" "Добавлено"
+  , txt Title "meta" "Название"
+  , txt Album "meta" "Альбом"
+  , txt Genre "meta" "Жанр"
+  , num Year "meta" "Год"
+  , txt ExplicitStatus "meta" "Explicit"
+  , flag HasCoverArt "logic" "Обложка"
+  , num RGTrackGain "meta" "ReplayGain"
   ]
   where
-    mk f title ops presence variants =
+    mk f grp title ops presence variants =
       FieldSchema
         { fsId = fieldDslName f
         , fsNspName = fieldName f
         , fsTitle = title
+        , fsGroup = grp
         , fsValueType = fieldValueType f
         , fsSortable = isSortableField f
         , fsPresenceCapable = presence
         , fsOperators = ops
         , fsValueVariants = variants
         }
-    txt f title = mk f title textOps (isJust (fieldPresence f)) Nothing
-    num f title = mk f title numberOps (isJust (fieldPresence f)) Nothing
-    flag f title =
-      mk f title boolOps False (Just ["да", "нет"])
-    date f title = mk f title (dateOps f) False Nothing
+    txt f grp title = mk f grp title textOps (isJust (fieldPresence f)) Nothing
+    num f grp title = mk f grp title numberOps (isJust (fieldPresence f)) Nothing
+    flag f grp title =
+      mk f grp title boolOps False (Just ["да", "нет"])
+    date f grp title = mk f grp title (dateOps f) False Nothing
 
 -- | Поле участвует в сортировке (все, кроме булевых) — по тому же
 -- признаку, что и 'Nspeller.Ast.sortFieldByName'.
@@ -187,6 +207,10 @@ schemaJson =
     , "groupKinds"
         .= [ object ["id" .= ("all" :: Text), "name" .= ("ВСЕ" :: Text)]
            , object ["id" .= ("any" :: Text), "name" .= ("ЛЮБОЕ" :: Text)]
+           ]
+    , "ingredientGroups"
+        .= [ object ["id" .= gid, "name" .= gname]
+           | (gid, gname) <- ingredientGroupSchemas
            ]
     , "sortDirections"
         .= [ object ["id" .= ("asc" :: Text), "name" .= ("по возрастанию" :: Text)]

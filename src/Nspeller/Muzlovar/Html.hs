@@ -10,6 +10,7 @@
 module Nspeller.Muzlovar.Html
   ( renderHtml
   , layout
+  , layoutWith
   , indexPage
   , editorPage
   , trashPage
@@ -17,7 +18,7 @@ module Nspeller.Muzlovar.Html
   , formatModified
   ) where
 
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Lazy as LT
@@ -37,39 +38,117 @@ renderHtml = renderText
 
 -- | Страница с шапкой, подвалом, тостами и подключёнными скриптами.
 layout :: Text -> Html () -> Html ()
-layout title mainContent =
+layout title = layoutWith title Nothing
+
+-- | Каркас страницы.
+--
+-- Второй аргумент — содержимое справа в шапке (кнопки редактора).
+-- @Just@ переключает каркас в режим редактора: подвал скрыт, @main@
+-- занимает всю высоту окна — три колонки на весь экран.
+layoutWith :: Text -> Maybe (Html ()) -> Html () -> Html ()
+layoutWith title mHeaderActions mainContent =
   doctypehtml_ (html_ [lang_ "ru"] page)
   where
+    editorMode = isJust mHeaderActions
+
     page =
       head_
         ( meta_ [charset_ "utf-8"]
             <> meta_ [name_ "viewport", content_ "width=device-width, initial-scale=1"]
             <> meta_ [name_ "color-scheme", content_ "dark"]
             <> title_ (toHtml title)
+            <> link_ [rel_ "icon", type_ "image/x-icon", href_ "/static/favicon.ico"]
             <> link_ [rel_ "stylesheet", href_ "/static/muzlovar.css"]
         )
         <> body_
-          ( header_
-              [class_ "app"]
-              ( h1_ [class_ "brand"] "Muzlovar"
-                  <> nav_
-                    ( a_ [href_ "/"] "Подборки"
-                        <> a_ [href_ "/new"] "Новая"
-                        <> a_ [href_ "/trash"] "Корзина"
-                    )
-              )
-              <> main_ mainContent
-              <> footer_
-                [class_ "app"]
-                "Muzlovar — редактор умных подборок Navidrome. Файлы .mix и .nsp \
-                \хранятся на диске; база данных Navidrome не изменяется напрямую."
+          ( header_ [class_ "app"] (brand <> headerActions)
+              <> main_ [class_ (if editorMode then "main-full" else "main")] mainContent
+              <> footerEl
               <> div_ [id_ "toasts", makeAttribute "aria-live" "polite"] ""
               <> script_ [src_ "/static/sortable.min.js"] ("" :: Text)
               <> script_ [src_ "/static/muzlovar.js"] ("" :: Text)
               <> dialogs
           )
 
-    dialogs = deleteDialog <> overwriteDialog
+    -- Логотип — ссылка на список подборок (навигация есть и в меню настроек).
+    brand =
+      a_
+        [href_ "/", class_ "brand", makeAttribute "title" "К списку подборок"]
+        ( img_
+            [ src_ "/static/logo.png"
+            , alt_ ""
+            , width_ "30"
+            , height_ "30"
+            , class_ "logo-img"
+            ]
+            -- Текст вынесен в общий baseline-контейнер: иконка центрируется
+            -- по нему, а «Музловар» и подзаголовок остаются на одной линии.
+            <> span_
+              [class_ "brand-text"]
+              ( span_ [class_ "logo"] "Музловар"
+                  <> span_ [class_ "subtitle"] "редактор умных подборок Navidrome"
+              )
+        )
+
+    headerActions =
+      div_ [class_ "header-actions"] (connStatus <> settingsButton <> fromMaybe mempty mHeaderActions)
+
+    -- Индикатор доступности прода: опрашивает публичный /health.
+    connStatus =
+      span_
+        [ id_ "conn-status"
+        , class_ "conn"
+        , makeAttribute "title" "Состояние подключения к проду"
+        ]
+        ( span_ [class_ "conn-dot"] ""
+            <> span_ [id_ "conn-text"] "Прод: проверка…"
+        )
+
+    settingsButton =
+      button_
+        [ id_ "settings-btn"
+        , type_ "button"
+        , class_ "icon-btn"
+        , makeAttribute "title" "Настройки"
+        , makeAttribute "aria-label" "Настройки"
+        , makeAttribute "aria-haspopup" "dialog"
+        ]
+        "\x2699\xFE0E"
+
+    footerEl =
+      if editorMode
+        then mempty
+        else
+          footer_
+            [class_ "app"]
+            "Muzlovar — редактор умных подборок Navidrome. Файлы .mix и .nsp \
+            \хранятся на диске; база данных Navidrome не изменяется напрямую."
+
+    dialogs = deleteDialog <> overwriteDialog <> settingsDialog
+
+    settingsDialog =
+      dialog_
+        [id_ "settings-dialog"]
+        ( h3_ "Настройки"
+            <> nav_
+              [class_ "settings-nav"]
+              ( a_ [href_ "/"] "Подборки"
+                  <> a_ [href_ "/new"] "Новая подборка"
+                  <> a_ [href_ "/trash"] "Корзина"
+              )
+            <> p_
+              [class_ "settings-note"]
+              "Файлы .mix и .nsp хранятся на диске; база данных Navidrome \
+              \не изменяется напрямую. Статус в шапке отражает доступность сервера."
+            <> div_
+              [class_ "row"]
+              ( button_
+                  [ type_ "button"
+                  , makeAttribute "onclick" "document.getElementById('settings-dialog').close()"
+                  ]
+                  "Закрыть"
+              )
+        )
 
     deleteDialog =
       dialog_
@@ -132,6 +211,14 @@ spacer_ = span_ [class_ "spacer"] ""
 -- | Элемент @dialog@ (в этой версии Lucid отсутствует).
 dialog_ :: Term arg result => arg -> result
 dialog_ = term "dialog"
+
+-- | Элементы @details@/@summary@ для сворачиваемых блоков кода
+-- (в этой версии Lucid отсутствуют).
+detailsEl :: Term arg result => arg -> result
+detailsEl = term "details"
+
+summaryEl :: Term arg result => arg -> result
+summaryEl = term "summary"
 
 ------------------------------------------------------------------------------
 -- Список подборок
@@ -242,90 +329,259 @@ badge cls label = span_ ([class_ ("badge " <> cls)] <> [makeAttribute "hidden" "
 ------------------------------------------------------------------------------
 
 -- | Каркас редактора. @Nothing@ — новая подборка.
+--
+-- Раскладка desktop: три колонки на всю высоту окна — ингредиенты
+-- (~22%), редактор подборки (~50%) и предпросмотр с публикацией
+-- (~28%). Дерево условий, палитра и правая колонка строятся
+-- @muzlovar.js@ по данным @/api@; здесь — каркас и статические
+-- блоки. Правая колонка читается сверху вниз: карточка подборки и
+-- статус проверки — главные, технический код .mix/.nsp — свёрнутые
+-- блоки в самом низу.
 editorPage :: Maybe Text -> Html ()
 editorPage mslug =
-  layout
-    title
-    ( div_
-        [id_ "editor", makeAttribute "data-slug" (fromMaybe "" mslug)]
-        ( div_
-            [id_ "e-status", class_ "state loading", makeAttribute "hidden" "hidden"]
-            ""
-            <> div_
-              [class_ "toolbar"]
-              ( a_ [href_ "/", class_ "btn"] "← К списку"
-                  <> spacer_
-                  <> button_ [id_ "e-save", type_ "button"] "Проверить"
-                  <> button_ [id_ "e-publish", type_ "button", class_ "primary"] "Опубликовать"
-                  <> maybe mempty (\_ -> button_ [id_ "e-delete", type_ "button", class_ "danger"] "Удалить") mslug
-              )
-            <> div_ [class_ "editor"]
-              ( div_
-                  ( panel
-                      "Метаданные"
-                      ( div_
-                          [class_ "fields"]
-                          ( field "Название" (input_ [id_ "e-name", type_ "text", autocomplete_ "off"])
-                              <> field "Описание" (input_ [id_ "e-desc", type_ "text", autocomplete_ "off"])
-                              <> field "Лимит треков" (input_ [id_ "e-limit", type_ "number", min_ "1"])
-                              <> div_
-                                [class_ "field"]
-                                ( label_ [for_ "e-public"] "Публичная"
-                                    <> div_
-                                      [class_ "check"]
-                                      ( input_ [id_ "e-public", type_ "checkbox"]
-                                          <> span_ "видна всем пользователям"
-                                      )
-                                )
-                          )
-                          <> p_
-                            [id_ "e-personal", class_ "notice", makeAttribute "hidden" "hidden"]
-                            ""
-                      )
-                      <> panel
-                        "Палитра полей"
-                        ( p_ [class_ "meta-line"] "Перетащите чип в дерево или нажмите на него."
-                            <> div_ [id_ "e-palette", class_ "palette"] ""
-                        )
-                      <> panel
-                        "Условия"
-                        ( div_ [id_ "e-tree"] ""
-                            <> div_ [id_ "e-errors", makeAttribute "hidden" "hidden"] ""
-                        )
-                      <> panel
-                        "Сортировка и лимит"
-                        ( div_ [id_ "e-sort", class_ "palette"] "" )
-                  )
-                  <> div_
-                    ( panel
-                        "Предпросмотр .mix"
-                        ( div_ [id_ "e-preview-wrap", makeAttribute "hidden" "hidden"] ""
-                            <> pre_ [id_ "e-preview", class_ "preview"] ""
-                        )
-                        <> panel
-                          "Исходные файлы"
-                          ( label_ [for_ "e-mix"] ".mix на диске"
-                              <> textarea_ [id_ "e-mix", rows_ "8", readonly_ ""] ""
-                              <> label_ [for_ "e-nsp"] ".nsp на диске"
-                              <> textarea_ [id_ "e-nsp", rows_ "8", readonly_ ""] ""
-                          )
-                    )
-              )
-        )
-    )
+  layoutWith title (Just editorActions) workspace
   where
     title = case mslug of
       Just s -> "Muzlovar — " <> s
       Nothing -> "Muzlovar — новая подборка"
 
-    panel :: Text -> Html () -> Html ()
-    panel h c = section_ [class_ "panel"] (h_ h <> c)
+    -- Кнопки редактора живут в шапке (см. 'layoutWith').
+    editorActions =
+      button_
+        [ id_ "e-save"
+        , type_ "button"
+        , class_ "btn"
+        , makeAttribute "title" "Проверить подборку"
+        ]
+        "Проверить"
+        <> button_ [id_ "e-publish", type_ "button", class_ "btn primary"] "Опубликовать"
 
-    h_ :: Text -> Html ()
-    h_ t = h2_ (toHtml t)
+    workspace =
+      div_
+        [ id_ "editor"
+        , class_ "workspace"
+        , makeAttribute "data-slug" (fromMaybe "" mslug)
+        ]
+        (leftColumn <> centerColumn <> rightColumn)
 
-    field :: Text -> Html () -> Html ()
-    field lbl ctl = div_ [class_ "field"] (label_ (toHtml lbl) <> ctl)
+    -------------------------------------------------------------- Ингредиенты
+    leftColumn =
+      section_
+        [class_ "col col-left"]
+        ( colHead "Ингредиенты"
+            <> div_
+              [class_ "col-search"]
+              ( input_
+                  [ id_ "e-search"
+                  , type_ "search"
+                  , autocomplete_ "off"
+                  , makeAttribute "placeholder" "Поиск ингредиента…"
+                  , makeAttribute "aria-label" "Поиск ингредиента"
+                  ]
+              )
+            -- Группы «Логика»/«История»/«Метаданные» и карточки
+            -- строит muzlovar.js из /api/schema.
+            <> div_ [id_ "e-palette", class_ "col-body"] ""
+        )
+
+    ---------------------------------------------------------- Рецепт подборки
+    centerColumn =
+      section_
+        [class_ "col col-center"]
+        ( colHead "Рецепт подборки"
+            <> div_
+              [class_ "col-body"]
+              ( div_
+                  [class_ "fields-row"]
+                  ( textField "Название" "e-name" "Название подборки"
+                      <> textField "Описание" "e-desc" "Зачем эта подборка"
+                  )
+                  <> p_ [id_ "e-personal", class_ "notice", makeAttribute "hidden" "hidden"] ""
+                  <> div_ [id_ "e-tree", class_ "rules"] ""
+              )
+            <> div_
+              [class_ "col-foot"]
+              ( footField
+                  "Порядок"
+                  (div_ [id_ "e-sort", class_ "sort-box"] "")
+                  <> footField
+                    "Лимит"
+                    ( input_
+                        [ id_ "e-limit"
+                        , type_ "number"
+                        , min_ "1"
+                        , makeAttribute "placeholder" "без лимита"
+                        , makeAttribute "aria-label" "Лимит треков"
+                        ]
+                    )
+                  <> div_
+                    [class_ "foot-field foot-check"]
+                    ( input_ [id_ "e-public", type_ "checkbox"]
+                        <> label_
+                          [for_ "e-public", makeAttribute "title" "Видна всем пользователям"]
+                          "Публичная"
+                    )
+              )
+        )
+
+    -------------------------------------------------------------- Предпросмотр
+    rightColumn =
+      section_
+        [class_ "col col-right"]
+        ( colHead "Предпросмотр"
+            <> div_
+              [class_ "col-body"]
+              ( div_ [id_ "e-status", class_ "state loading", makeAttribute "hidden" "hidden"] ""
+                  -- Карточка подборки и статус проверки — смысл колонки,
+                  -- поэтому они идут сразу; технический код ниже.
+                  <> playlistCard
+                  <> section_
+                    [class_ "block"]
+                    ( span_ [class_ "block-title"] "Проверка"
+                        <> div_ [id_ "e-validity", class_ "validity pending"]
+                          (span_ [class_ "vdot"] "" <> span_ [id_ "e-validity-text"] "Ожидание…")
+                        <> div_ [id_ "e-errors", makeAttribute "hidden" "hidden"] ""
+                    )
+                  <> div_ [class_ "tabs", makeAttribute "role" "tablist"]
+                    (tabButton "rules" "Правила" True <> tabButton "mix" ".mix" False)
+                  <> div_ [id_ "tab-rules", class_ "tab-panel"]
+                    (div_ [id_ "e-rules", class_ "view-tree"] "")
+                  <> div_ [id_ "tab-mix", class_ "tab-panel", makeAttribute "hidden" "hidden"]
+                    ( div_
+                        [id_ "e-preview-wrap", makeAttribute "hidden" "hidden"]
+                        ( blockHead
+                            "Скомпилированный .mix"
+                            (button_ [id_ "e-copy-preview", type_ "button", class_ "btn small"] "Копировать")
+                            <> pre_ [id_ "e-preview", class_ "code"] ""
+                        )
+                    )
+                  <> section_
+                    [class_ "block"]
+                    ( blockHead
+                        "Путь публикации"
+                        (button_ [id_ "e-path-edit", type_ "button", class_ "btn small"] "Изменить")
+                        <> code_ [id_ "e-path", class_ "path"] "—"
+                        <> p_
+                          [class_ "block-note"]
+                          "Имя задаётся названием подборки; файл .nsp попадает \
+                          \в каталог PlaylistsPath Navidrome."
+                    )
+                  -- Технический код на диске: свёрнут, пока не нужен.
+                  <> collapsibleCode
+                    "Код .mix"
+                    "e-mix"
+                    "5"
+                    "Код .mix на диске"
+                    (Just "e-copy-mix")
+                  <> collapsibleCode ".nsp на диске" "e-nsp" "3" "Код .nsp на диске" Nothing
+              )
+            <> deleteFoot
+        )
+
+    -------------------------------------------------------------- Вспомогательное
+    colHead :: Text -> Html ()
+    colHead t = div_ [class_ "col-head"] (h2_ (toHtml t))
+
+    textField :: Text -> Text -> Text -> Html ()
+    textField lbl fid ph =
+      div_
+        [class_ "field"]
+        ( label_ [for_ fid] (toHtml lbl)
+            <> input_
+              [ id_ fid
+              , type_ "text"
+              , autocomplete_ "off"
+              , makeAttribute "placeholder" ph
+              ]
+        )
+
+    footField :: Text -> Html () -> Html ()
+    footField lbl ctl =
+      div_ [class_ "foot-field"] (span_ [class_ "foot-label"] (toHtml lbl) <> ctl)
+
+    blockHead :: Text -> Html () -> Html ()
+    blockHead t action =
+      div_ [class_ "block-head"] (span_ [class_ "block-title"] (toHtml t) <> action)
+
+    -- Свёрнутый по умолчанию блок технического кода: пока не раскрыт,
+    -- пустая textarea не занимает место в колонке.
+    collapsibleCode :: Text -> Text -> Text -> Text -> Maybe Text -> Html ()
+    collapsibleCode heading fid rows label mCopy =
+      detailsEl
+        [class_ "block collapsible"]
+        ( summaryEl
+            [class_ "block-summary"]
+            ( span_ [class_ "caret", makeAttribute "aria-hidden" "true"] ""
+                <> span_ [class_ "block-title"] (toHtml heading)
+            )
+            <> div_
+              [class_ "block-body"]
+              ( div_
+                  [class_ "block-row"]
+                  ( span_ [class_ "block-label"] (toHtml label)
+                      <> maybe
+                        mempty
+                        (\cid -> button_ [id_ cid, type_ "button", class_ "btn small"] "Копировать")
+                        mCopy
+                  )
+                  <> textarea_
+                    [ id_ fid
+                    , class_ "code"
+                    , rows_ rows
+                    , readonly_ ""
+                    , makeAttribute "spellcheck" "false"
+                    , makeAttribute "aria-label" label
+                    ]
+                    ""
+              )
+        )
+
+    tabButton :: Text -> Text -> Bool -> Html ()
+    tabButton key label active =
+      button_
+        ( [ type_ "button"
+          , class_ (if active then "tab active" else "tab")
+          , makeAttribute "data-tab" key
+          , makeAttribute "role" "tab"
+          ]
+            <> [makeAttribute "aria-selected" (if active then "true" else "false")]
+        )
+        (toHtml label)
+
+    -- Карточка подборки: коллаж-обложка, название и число треков.
+    playlistCard :: Html ()
+    playlistCard =
+      div_
+        [class_ "pl-card"]
+        ( div_
+            [class_ "pl-cover", makeAttribute "aria-hidden" "true"]
+            (span_ "" <> span_ "" <> span_ "" <> span_ "")
+            <> div_
+              [class_ "pl-info"]
+              ( div_ [id_ "pl-title", class_ "pl-title"] "Без названия"
+                  <> div_ [id_ "pl-meta", class_ "pl-meta"] "Лимит не задан"
+              )
+        )
+
+    -- Деструктивное действие — в самом низу колонки (только если
+    -- подборка опубликована).
+    deleteFoot :: Html ()
+    deleteFoot =
+      maybe
+        mempty
+        ( \_ ->
+            div_
+              [class_ "col-foot"]
+              ( button_
+                  [ id_ "e-delete"
+                  , type_ "button"
+                  , class_ "btn danger wide"
+                  , makeAttribute "title" "Перенести подборку в корзину"
+                  ]
+                  "Удалить из прода"
+              )
+        )
+        mslug
 
 ------------------------------------------------------------------------------
 -- Корзина

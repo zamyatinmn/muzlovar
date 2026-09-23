@@ -13,7 +13,8 @@
 --   * @GET /api/trash@, @POST /api/trash\/:id\/restore@,
 --     @DELETE /api/trash\/:id@;
 --   * HTML-страницы @/@, @/new@, @/edit\/:slug@, @/trash@;
---   * @/static/*@ — вшитые CSS/JS.
+--   * @/static/*@ — вшитые CSS/JS, логотип и фавикон; @/favicon.ico@ —
+--     alias фавикона (браузер запрашивает его без Credentials).
 --
 -- Basic Auth с сравнением пароля за постоянное время (включается только
 -- при заданных @MUZLOVAR_USERNAME@ и @MUZLOVAR_PASSWORD@); пароль и
@@ -131,8 +132,8 @@ muzlovarApp cfg = do
 -- Авторизация
 ------------------------------------------------------------------------------
 
--- | Basic Auth middleware: @/health@ и @/static/*@ открыты, остальное —
--- только при верных учётных данных.
+-- | Basic Auth middleware: @/health@, @/static/*@ и @/favicon.ico@
+-- открыты, остальное — только при верных учётных данных.
 basicAuthMiddleware :: Text -> Text -> Middleware
 basicAuthMiddleware user pass app req respond =
   if isPublic (pathInfo req)
@@ -147,7 +148,7 @@ basicAuthMiddleware user pass app req respond =
               [(hWWWAuthenticate, "Basic realm=\"Muzlovar\", charset=\"UTF-8\"")]
               "{\"error\":{\"code\":\"unauthorized\",\"message\":\"Требуется авторизация.\",\"path\":null,\"line\":null,\"column\":null}}"
   where
-    isPublic p = p == ["health"] || take 1 p == ["static"]
+    isPublic p = p == ["health"] || p == ["favicon.ico"] || take 1 p == ["static"]
 
     authorized hdrs =
       case lookup hAuthorization hdrs of
@@ -329,6 +330,15 @@ routes cfg = do
     serveBytes "application/javascript; charset=utf-8" Assets.muzlovarJs
   get "/static/sortable.min.js" $
     serveBytes "application/javascript; charset=utf-8" Assets.sortableJs
+  get "/static/logo.png" $
+    serveBytes "image/png" Assets.logoPng
+  get "/static/favicon.ico" $
+    serveBytes "image/x-icon" Assets.faviconIco
+  -- Браузер запрашивает /favicon.ico без Credentials: без этого
+  -- маршрута (и без публикации в basicAuthMiddleware) вкладка
+  -- осталась бы без иконки при включённой авторизации.
+  get "/favicon.ico" $
+    serveBytes "image/x-icon" Assets.faviconIco
 
   ------------------------------------------------------------------ html
   get "/" $ do

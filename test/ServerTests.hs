@@ -171,13 +171,18 @@ authTests :: TestTree
 authTests =
   testGroup
     "авторизация"
-    [ testCase "авторизация включена: /health и /static открыты, API закрыт" $
+    [ testCase "авторизация включена: /health, /static и favicon открыты, API закрыт" $
         withServer "auth" $ \app _cfg -> do
           h <- run1 app (sreq methodGet "/health" "" "" [])
           statusOf h @?= 200
           assertBool ("нет статуса ok: " <> show (simpleBody h)) (bodyContains "\"ok\"" h)
           c <- run1 app (sreq methodGet "/static/muzlovar.js" "" "" [])
           statusOf c @?= 200
+          -- фавикон браузер запрашивает без учётных данных
+          fi <- run1 app (sreq methodGet "/favicon.ico" "" "" [])
+          statusOf fi @?= 200
+          assertBool "favicon не image/x-icon" $
+            lookup hContentType (simpleHeaders fi) == Just "image/x-icon"
           -- без учётных данных
           u <- run1 app (sreq methodGet "/api/schema" "" "" [])
           statusOf u @?= 401
@@ -204,6 +209,30 @@ authTests =
           statusOf p @?= 200
           h <- run1 app (sreq methodGet "/health" "" "" [])
           statusOf h @?= 200
+    , testCase "шапка и head: логотип и фавикон подключены" $
+        withOpenServer "brand" $ \app _cfg -> do
+          p <- run1 app (sreq methodGet "/" "" "" [])
+          statusOf p @?= 200
+          assertBool "нет ссылки на фавикон в head" $
+            bodyContains "rel=\"icon\"" p
+          assertBool "нет href фавикона" $
+            bodyContains "href=\"/static/favicon.ico\"" p
+          assertBool "нет логотипа в шапке" $
+            bodyContains "src=\"/static/logo.png\"" p
+          assertBool "нет класса логотипа" $
+            bodyContains "class=\"logo-img\"" p
+          -- сами ресурсы отдаются с корректным content-type
+          l <- run1 app (sreq methodGet "/static/logo.png" "" "" [])
+          statusOf l @?= 200
+          assertBool "logo не image/png" $
+            lookup hContentType (simpleHeaders l) == Just "image/png"
+          f <- run1 app (sreq methodGet "/static/favicon.ico" "" "" [])
+          statusOf f @?= 200
+          assertBool "favicon не image/x-icon" $
+            lookup hContentType (simpleHeaders f) == Just "image/x-icon"
+          -- PNG-заголовок, а не пустая заглушка
+          assertBool "logo не начинается с PNG-сигнатуры" $
+            BS.isPrefixOf (BS.pack [0x89, 0x50, 0x4E, 0x47]) (LBS.toStrict (simpleBody l))
     ]
 
 ------------------------------------------------------------------------------
