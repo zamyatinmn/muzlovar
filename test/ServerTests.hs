@@ -250,6 +250,12 @@ validateTests =
         Just (String m) ->
           assertBool ("в предпросмотре нет «подборка»: " <> T.unpack m) ("подборка" `T.isInfixOf` m)
         other -> assertFailure ("нет .mix в ответе: " <> show other)
+      case bodyField "nsp" ok of
+        Just (String n) ->
+          assertBool
+            ("в предпросмотре .nsp нет массива all: " <> T.unpack n)
+            ("\"all\"" `T.isInfixOf` n)
+        other -> assertFailure ("нет .nsp в ответе: " <> show other)
       -- структурная ошибка
       bad <- run1 app (sreq methodPost "/api/validate" "" (encode validDto {pdName = ""}) [authHeader])
       statusOf bad @?= 422

@@ -36,11 +36,11 @@
   function cacheEls() {
     [
       'editor', 'e-name', 'e-desc', 'e-public', 'e-limit',
-      'e-status', 'e-palette', 'e-tree', 'e-sort', 'e-errors', 'e-preview',
+      'e-status', 'e-palette', 'e-tree', 'e-sort', 'e-errors', 'e-preview', 'e-preview-nsp',
       'e-preview-wrap', 'e-personal', 'e-save', 'e-publish', 'e-delete',
       'e-mix', 'e-nsp', 'toasts',
       'e-search', 'e-rules', 'e-validity', 'e-validity-text',
-      'e-path', 'e-path-edit', 'e-copy-mix', 'e-copy-preview',
+      'e-path', 'e-path-edit', 'e-copy-mix', 'e-copy-preview', 'e-copy-nsp',
       'pl-title', 'pl-meta', 'tab-rules', 'tab-mix',
       'conn-status', 'conn-text', 'settings-btn', 'settings-dialog'
     ].forEach(function (id) { els[id] = document.getElementById(id); });
@@ -142,6 +142,9 @@
     bindCopy('e-copy-preview', function () {
       return els['e-preview'] ? els['e-preview'].textContent : '';
     });
+    bindCopy('e-copy-nsp', function () {
+      return els['e-preview-nsp'] ? els['e-preview-nsp'].textContent : '';
+    });
   }
 
   /* Статус подключения к проду: опрашивает публичный /health. */
@@ -190,7 +193,7 @@
       btn.classList.toggle('active', on);
       btn.setAttribute('aria-selected', on ? 'true' : 'false');
     });
-    ['rules', 'mix'].forEach(function (k) {
+    ['rules', 'mix', 'nsp'].forEach(function (k) {
       var panel = document.getElementById('tab-' + k);
       if (panel) panel.hidden = (k !== key);
     });
@@ -260,6 +263,53 @@
     return g.items.splice(idx, 1)[0];
   }
 
+  /* ------------------------------------------------------------------ */
+  /* Стабильные идентификаторы элементов                                 */
+  /* ------------------------------------------------------------------ */
+
+  /* Поле («год», «жанр») не может быть ключом состояния: одинаковые
+   * поля живут как независимые элементы со своими id. id служебный,
+   * в DTO не сериализуется. */
+  var idSeq = 0;
+
+  function newId() {
+    idSeq += 1;
+    return 'it' + idSeq + '-' + Date.now().toString(36);
+  }
+
+  function ensureIds(dto) {
+    var walk = function (items) {
+      (items || []).forEach(function (it) {
+        if (!it.id) it.id = newId();
+        if (it.type === 'group') walk(it.items);
+      });
+    };
+    walk(dto && dto.root ? dto.root.items : []);
+  }
+
+  function findItem(id) {
+    var walk = function (items, path) {
+      for (var i = 0; i < items.length; i++) {
+        var it = items[i];
+        var p = path + '/items/' + i;
+        if (it.id === id) return { item: it, path: p, list: items, index: i };
+        if (it.type === 'group') {
+          var r = walk(it.items, p);
+          if (r) return r;
+        }
+      }
+      return null;
+    };
+    return walk(model.root.items, '/root');
+  }
+
+  function removeItemById(id) {
+    var r = findItem(id);
+    if (!r) return null;
+    r.list.splice(r.index, 1);
+    return r.item;
+  }
+
   function insertItem(groupPath, index, item) {
     var g = groupAt(groupPath);
     if (!g) g = model.root;
@@ -293,7 +343,7 @@
   function defaultCond(fieldId) {
     var f = fieldById(fieldId) || schema.fields[0];
     var opId = f.operators[0];
-    return { type: 'cond', field: f.id, op: opId, value: defaultValue(f, opId) };
+    return { id: newId(), type: 'cond', field: f.id, op: opId, value: defaultValue(f, opId) };
   }
 
   function defaultValue(field, op) {
@@ -363,6 +413,7 @@
       }
       if (!editable) setActions(false);
       buildPalette();
+      bindPaletteClicks();
       bindSearch();
       bindForm();
       renderAll();
@@ -387,6 +438,7 @@
     if (dto.description === undefined || dto.description === null) dto.description = '';
     if (dto.limit === undefined) dto.limit = null;
     if (!dto.sort) dto.sort = { kind: 'random' };
+    ensureIds(dto);
     return dto;
   }
 
@@ -569,14 +621,35 @@
       card.appendChild(el('span', { class: 'ing-flag', text: 'личное', title: 'Персональное поле' }));
     }
     card.appendChild(el('span', { class: 'ing-handle', text: '⠿', 'aria-hidden': 'true' }));
-    // Клик — доступная альтернатива перетаскиванию.
-    card.addEventListener('click', function () {
-      insertItem(selectedGroup, null, defaultCond(f.id));
+    // Клик обрабатывается делегированием на всём поле ингредиентов
+    // (bindPaletteClicks): после drag & drop в палитре может остаться
+    // клон карточки без собственных слушателей.
+    return card;
+  }
+
+  /* Клик по ингредиенту — доступная альтернатива перетаскиванию.
+   * Делегирование на всём поле: слушатели не переживают клонирование
+   * Sortable, поэтому клик работает и по клону, оставшемуся после drag. */
+  function bindPaletteClicks() {
+    var box = els['e-palette'];
+    if (!box || box.getAttribute('data-click-bound') === '1') return;
+    box.setAttribute('data-click-bound', '1');
+    box.addEventListener('click', function (e) {
+      if (!editable) return;
+      var node = e.target;
+      var card = null;
+      while (node && node !== box) {
+        if (node.classList && node.classList.contains('ing')) { card = node; break; }
+        node = node.parentNode;
+      }
+      if (!card) return;
+      var field = card.getAttribute('data-chip-field');
+      if (!field) return;
+      insertItem(selectedGroup, null, defaultCond(field));
       recomputeSelected();
       renderTree();
       scheduleValidate(0);
     });
-    return card;
   }
 
   function bindSearch() {
@@ -618,6 +691,7 @@
   function renderTree() {
     var box = els['e-tree'];
     if (!box) return;
+    ensureIds(model);
     clear(box);
     box.appendChild(renderGroup(model.root, '/root', 0));
 
@@ -685,7 +759,7 @@
       class: 'small add', type: 'button', text: '+ группа',
       disabled: editable ? null : 'disabled',
       onclick: function () {
-        group.items.push({ type: 'group', kind: 'any', items: [] });
+        group.items.push({ id: newId(), type: 'group', kind: 'any', items: [] });
         selectedGroup = path + '/items/' + (group.items.length - 1);
         renderTree(); scheduleValidate(0);
       }
@@ -719,6 +793,7 @@
       var p = path + '/items/' + i;
       var li = el('li', { class: 'node' });
       li.setAttribute('data-path', p);
+      li.setAttribute('data-id', item.id || '');
       if (item.type === 'group') {
         li.appendChild(renderGroup(item, p, depth + 1));
       } else if (item.type === 'raw') {
@@ -1063,22 +1138,46 @@
         ghostClass: 'sortable-ghost',
         chosenClass: 'sortable-chosen',
         disabled: !editable,
+        // Палитра → дерево: Sortable переносит original-карточку, а onEnd
+        // срабатывает на источнике (в палитре обработчика нет) — поэтому
+        // drop ингредиента обрабатывается здесь, когда Sortable закончит
+        // с DOM (события источника: onRemove/onEnd без обработчиков).
+        onAdd: function (evt) {
+          if (!evt.item) return;
+          // Перенос внутри дерева обрабатывается в onEnd источника.
+          if (evt.from && evt.from.getAttribute('data-list-path') !== null) return;
+          var chipField = evt.item.getAttribute('data-chip-field');
+          if (!chipField) return;
+          var target = evt.to;
+          var listPath = target.getAttribute('data-list-path');
+          var index = target.getAttribute('data-append') === '1' ? null : evt.newIndex;
+          var field = chipField;
+          setTimeout(function () {
+            insertItem(listPath, index, defaultCond(field));
+            recomputeSelected();
+            renderAll(); // перерисовка убирает посторонний DOM-узел из дерева
+            scheduleValidate(0);
+          }, 0);
+        },
         onEnd: function (evt) {
           // Drop zone принимает в конец списка.
           var append = evt.to.getAttribute('data-append') === '1';
           var chipField = evt.item.getAttribute('data-chip-field');
           if (chipField) {
-            // Перетаскивание ингредиента из палитры (клон).
+            // Ингредиент из палитры — основной путь в onAdd; здесь страховка.
             evt.item.parentNode && evt.item.parentNode.removeChild(evt.item);
             insertItem(ul.getAttribute('data-list-path'), append ? null : evt.newIndex, defaultCond(chipField));
             recomputeSelected();
             renderAll(); scheduleValidate(0);
             return;
           }
+          // Перемещение внутри дерева: элемент ищется по стабильному id
+          // (индексный путь — запасной вариант).
+          var itemId = evt.item.getAttribute('data-id');
           var itemPath = evt.item.getAttribute('data-path');
-          if (!itemPath) { renderAll(); return; }
+          if (!itemId && !itemPath) { renderAll(); return; }
           var target = evt.to.getAttribute('data-list-path');
-          var moved = removeItemAt(itemPath);
+          var moved = itemId ? removeItemById(itemId) : removeItemAt(itemPath);
           if (!moved) { renderAll(); return; }
           insertItem(target, append ? null : evt.newIndex, moved);
           recomputeSelected();
@@ -1098,6 +1197,9 @@
 
   function scheduleValidate(delay) {
     if (!schema) return;
+    // Живое обновление вкладки «Правила»: локальный рендер не ждёт
+    // ответа сервера и выполняется при любом изменении рецепта.
+    renderRulesView();
     if (validateTimer) clearTimeout(validateTimer);
     validateTimer = setTimeout(runValidate,
       delay === undefined ? 400 : delay);
@@ -1123,6 +1225,15 @@
       } else if (!lastValidateOk) {
         els['e-preview'].textContent = '';
       }
+      var nspPre = els['e-preview-nsp'];
+      if (nspPre) {
+        if (lastValidateOk && res.data.nsp) {
+          nspPre.textContent = res.data.nsp;
+          if (nspPre.parentNode) nspPre.parentNode.hidden = false;
+        } else if (!lastValidateOk) {
+          nspPre.textContent = '';
+        }
+      }
       setValidity(
         lastValidateOk ? 'ok' : 'err',
         lastValidateOk
@@ -1142,7 +1253,8 @@
   /* ------------------------------------------------------------------ */
 
   function publish() {
-    runValidate();
+    // Публикация пишет на диск уже показанный результат последней
+    // успешной проверки; сервер при сохранении выполняет свою проверку.
     if (!lastValidateOk) {
       toast('error', 'Сначала исправьте ошибки валидации.');
       return;

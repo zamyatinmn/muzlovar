@@ -5,7 +5,7 @@
 -- 'compilePlaylistDto' и обратные переводы @.mix@/@.nsp@ -> DTO.
 module DtoTests (dtoTests) where
 
-import Data.Aeson (Value (..), decode, eitherDecode, encode, toJSON)
+import Data.Aeson (Value (..), decode, eitherDecode, encode, object, toJSON, (.=))
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
@@ -329,6 +329,130 @@ nspToDtoTests =
     ]
 
 ------------------------------------------------------------------------------
+-- Дублирующиеся поля
+------------------------------------------------------------------------------
+
+-- | «Любимое = да AND Год > 2010 AND Год < 2020»: поле год
+-- повторяется — оба условия обязаны сохраниться независимо
+-- и в исходном порядке на всём пути DTO → .mix → .nsp.
+dupDto :: PlaylistDto
+dupDto =
+  (simpleDto "Дубли полей")
+    { pdRoot =
+        GroupDto
+          "all"
+          [ ItemCond (CondDto "любимое" "eq" (Just (Bool True)))
+          , ItemCond (CondDto "год" "gt" (Just (Number 2010)))
+          , ItemCond (CondDto "год" "lt" (Just (Number 2020)))
+          ]
+    }
+
+-- | Тот же DTO после раунд-трипа через .mix: DSL-сахар
+-- «любимое» ≡ «любимое = да» нормализуется в bare
+-- (VBool True -> bare в 'condItemDto'); оба ограничения года
+-- должны пройти без изменений.
+dupDtoFromMix :: PlaylistDto
+dupDtoFromMix =
+  dupDto
+    { pdRoot =
+        GroupDto
+          "all"
+          [ ItemCond (CondDto "любимое" "bare" Nothing)
+          , ItemCond (CondDto "год" "gt" (Just (Number 2010)))
+          , ItemCond (CondDto "год" "lt" (Just (Number 2020)))
+          ]
+    }
+
+-- | Индекс первого вхождения подстроки; @maxBound@ — не найдено.
+indexOf :: Text -> Text -> Int
+indexOf needle hay =
+  let (before, rest) = T.breakOn needle hay
+   in if T.null rest then maxBound else T.length before
+
+-- | JSON, который редактор отправляет на сервер: у каждого элемента
+-- есть служебное поле id — оно не влияет на разбор и порядок.
+withClientIds :: LBS.ByteString
+withClientIds =
+  encode $
+    object
+      [ "name" .= ("Дубли полей" :: Text)
+      , "public" .= False
+      , "root"
+          .= object
+            [ "kind" .= ("all" :: Text)
+            , "items"
+                .= [ object
+                       [ "type" .= ("cond" :: Text)
+                       , "id" .= ("c-1" :: Text)
+                       , "field" .= ("любимое" :: Text)
+                       , "op" .= ("eq" :: Text)
+                       , "value" .= True
+                       ]
+                   , object
+                       [ "type" .= ("cond" :: Text)
+                       , "id" .= ("c-2" :: Text)
+                       , "field" .= ("год" :: Text)
+                       , "op" .= ("gt" :: Text)
+                       , "value" .= (2010 :: Integer)
+                       ]
+                   , object
+                       [ "type" .= ("cond" :: Text)
+                       , "id" .= ("c-3" :: Text)
+                       , "field" .= ("год" :: Text)
+                       , "op" .= ("lt" :: Text)
+                       , "value" .= (2020 :: Integer)
+                       ]
+                   ]
+            ]
+      ]
+
+duplicateFieldTests :: TestTree
+duplicateFieldTests =
+  testGroup
+    "Дублирующиеся поля"
+    [ testCase ".mix: оба условия год на месте и в порядке DTO" $
+        case compilePlaylistDto dupDto of
+          Left es -> assertFailure ("ошибки компиляции: " <> show es)
+          Right c -> do
+            let mix = cmpMix c
+            assertBool ("нет любимое = да: " <> T.unpack mix) ("любимое = да" `T.isInfixOf` mix)
+            assertBool ("нет год > 2010: " <> T.unpack mix) ("год > 2010" `T.isInfixOf` mix)
+            assertBool ("нет год < 2020: " <> T.unpack mix) ("год < 2020" `T.isInfixOf` mix)
+            assertBool
+              "порядок условий в .mix нарушен"
+              ( indexOf "любимое" mix
+                  < indexOf "год > 2010" mix
+                  && indexOf "год > 2010" mix < indexOf "год < 2020" mix
+              )
+    , testCase ".nsp: оба ограничения год на месте и в порядке DTO" $
+        case compilePlaylistDto dupDto of
+          Left es -> assertFailure ("ошибки компиляции: " <> show es)
+          Right c -> do
+            let nsp = TE.decodeUtf8 (LBS.toStrict (cmpNsp c))
+            assertBool ("нет 2010: " <> T.unpack nsp) ("2010" `T.isInfixOf` nsp)
+            assertBool ("нет 2020: " <> T.unpack nsp) ("2020" `T.isInfixOf` nsp)
+            assertBool "порядок год в .nsp нарушен" (indexOf "2010" nsp < indexOf "2020" nsp)
+            case (eitherDecode (cmpNsp c) :: Either String Value) of
+              Right (Object o) ->
+                case KM.lookup "all" o of
+                  Just (Array _) -> pure ()
+                  other -> assertFailure (".nsp без корневого массива all: " <> show other)
+              other -> assertFailure (".nsp не является JSON-объектом: " <> show other)
+    , testCase "dtoFromMix(compile(dup)) == dup с нормализацией сахара" $
+        case compilePlaylistDto dupDto of
+          Left es -> assertFailure ("ошибки компиляции: " <> show es)
+          Right c -> dtoFromMix (cmpMix c) @?= Right dupDtoFromMix
+    , testCase "nspToDto(compile(dup)) == dup" $
+        case compilePlaylistDto dupDto of
+          Left es -> assertFailure ("ошибки компиляции: " <> show es)
+          Right c -> case (eitherDecode (cmpNsp c) :: Either String Value) of
+            Left e -> assertFailure (".nsp не разбирается: " <> e)
+            Right v -> nspToDto v @?= Right dupDto
+    , testCase "JSON редактора с client-id разбирается в тот же DTO" $
+        decode withClientIds @?= Just dupDto
+    ]
+
+------------------------------------------------------------------------------
 -- Итоговый набор
 ------------------------------------------------------------------------------
 
@@ -341,4 +465,5 @@ dtoTests =
     , compileTests
     , roundTripTests
     , nspToDtoTests
+    , duplicateFieldTests
     ]

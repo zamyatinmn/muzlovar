@@ -80,7 +80,7 @@ import Nspeller.Muzlovar.Subsonic
   )
 import Nspeller.Muzlovar.Types
   ( ApiError
-  , Compiled (cmpMix)
+  , Compiled (cmpMix, cmpNsp)
   , PlaylistDto
   , apiError
   , compilePlaylistDto
@@ -251,6 +251,7 @@ routes cfg = do
             object
               [ "ok" .= True
               , "mix" .= LT.fromStrict (cmpMix compiled)
+              , "nsp" .= LTE.decodeUtf8 (cmpNsp compiled)
               , "errors" .= ([] :: [ApiError])
               ]
 

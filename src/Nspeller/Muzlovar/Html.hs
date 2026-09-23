@@ -443,7 +443,10 @@ editorPage mslug =
                         <> div_ [id_ "e-errors", makeAttribute "hidden" "hidden"] ""
                     )
                   <> div_ [class_ "tabs", makeAttribute "role" "tablist"]
-                    (tabButton "rules" "Правила" True <> tabButton "mix" ".mix" False)
+                    ( tabButton "rules" "Правила" True
+                        <> tabButton "mix" ".mix" False
+                        <> tabButton "nsp" ".nsp" False
+                    )
                   <> div_ [id_ "tab-rules", class_ "tab-panel"]
                     (div_ [id_ "e-rules", class_ "view-tree"] "")
                   <> div_ [id_ "tab-mix", class_ "tab-panel", makeAttribute "hidden" "hidden"]
@@ -453,6 +456,15 @@ editorPage mslug =
                             "Скомпилированный .mix"
                             (button_ [id_ "e-copy-preview", type_ "button", class_ "btn small"] "Копировать")
                             <> pre_ [id_ "e-preview", class_ "code"] ""
+                        )
+                    )
+                  <> div_ [id_ "tab-nsp", class_ "tab-panel", makeAttribute "hidden" "hidden"]
+                    ( div_
+                        [id_ "e-nsp-preview-wrap", makeAttribute "hidden" "hidden"]
+                        ( blockHead
+                            "Скомпилированный .nsp (предпросмотр)"
+                            (button_ [id_ "e-copy-nsp", type_ "button", class_ "btn small"] "Копировать")
+                            <> pre_ [id_ "e-preview-nsp", class_ "code"] ""
                         )
                     )
                   <> section_
