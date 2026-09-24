@@ -13,14 +13,13 @@
 -- (ингредиенты · рецепт · предпросмотр) со спокойной продуктовой
 -- плотностью: мягкие surface-слои вместо стопки рамок, отступы и
 -- guide-линии для вложенности дерева и однострочные условия, JS строит
--- палитру и дерево (v2) по данным @/api/schema@. SortableJS 1.15.7
--- вендорен в репозитории, чтобы интерфейс работал без доступа в
--- интернет. Логотип и фавикон — одна и та же иконка (котёл с нотой),
--- она же branding шапки.
+-- палитру и дерево (v2) по данным @/api/schema@. Drag & drop дерева —
+-- собственный (pointer events, «призрак» + индикатор вставки), без
+-- сторонних библиотек. Логотип и фавикон — одна и та же иконка
+-- (котёл с нотой), она же branding шапки.
 module Nspeller.Muzlovar.Assets
   ( muzlovarCss
   , muzlovarJs
-  , sortableJs
   , logoPng
   , faviconIco
   ) where
@@ -35,10 +34,6 @@ muzlovarCss = $(embedFile "muzlovar/static/muzlovar.css")
 -- | Логика редактора (vanilla JS).
 muzlovarJs :: ByteString
 muzlovarJs = $(embedFile "muzlovar/static/muzlovar.js")
-
--- | Vendored SortableJS 1.15.7.
-sortableJs :: ByteString
-sortableJs = $(embedFile "muzlovar/static/sortable.min.js")
 
 -- | Логотип в шапке: 128×128 PNG с прозрачным фоном (показывается
 -- около 30px, запас на retina).

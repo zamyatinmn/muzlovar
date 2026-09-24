@@ -256,6 +256,9 @@ validateTests =
             ("в предпросмотре .nsp нет массива all: " <> T.unpack n)
             ("\"all\"" `T.isInfixOf` n)
         other -> assertFailure ("нет .nsp в ответе: " <> show other)
+      -- итоговый slug (будущий filename) — блок «Опубликовано /
+      -- Будет опубликовано» сравнивает его с опубликованным путём
+      bodyField "slug" ok @?= Just (String (slugFromName (pdName validDto)))
       -- структурная ошибка
       bad <- run1 app (sreq methodPost "/api/validate" "" (encode validDto {pdName = ""}) [authHeader])
       statusOf bad @?= 422
@@ -344,6 +347,131 @@ lifecycleTests =
       bodyField "purged" pg @?= Just (Bool True)
       tl2 <- run1 app (sreq methodGet "/api/trash" "" "" [authHeader])
       trashIds tl2 @?= []
+
+------------------------------------------------------------------------------
+-- Переименование опубликованной подборки (PUT)
+------------------------------------------------------------------------------
+
+-- | Slug'ы из массива @playlists@ ответа списка.
+entrySlugs :: SResponse -> [Text]
+entrySlugs l = case bodyField "playlists" l of
+  Just (Array v) ->
+    [s | Object e <- foldr (:) [] v, Just (String s) <- [KM.lookup "slug" e]]
+  _ -> []
+
+-- | Итоговый slug: так же его вычисляет PUT /api/playlists/:slug.
+renameSlug :: Text
+renameSlug = slugFromName (pdName renameDto)
+
+renameDto :: PlaylistDto
+renameDto = validDto {pdName = "Новое Название"}
+
+-- | @.nsp@, скомпилированный из DTO (для пар, записанных мимо
+-- приложения).
+compiledNsp :: PlaylistDto -> BS.ByteString
+compiledNsp dto = case compilePlaylistDto dto of
+  Right c -> LBS.toStrict (cmpNsp c)
+  Left es -> error ("compilePlaylistDto: " <> show es)
+
+renameTests :: TestTree
+renameTests =
+  testGroup
+    "PUT: переименование опубликованной подборки"
+    [ testCase "новый файл опубликован, старый удалён, список и страница обновлены" $
+        withServer "put-rename" $ \app cfg -> do
+          let slug0 = slugFromName (pdName validDto)
+              oldNsp = scPlaylistsDir cfg </> (T.unpack slug0 ++ ".nsp")
+              oldMix = scRulesDir cfg </> (T.unpack slug0 ++ ".mix")
+              newNsp = scPlaylistsDir cfg </> (T.unpack renameSlug ++ ".nsp")
+              newMix = scRulesDir cfg </> (T.unpack renameSlug ++ ".mix")
+          c <-
+            run1 app (sreq methodPost "/api/playlists" "" (encode validDto) [authHeader])
+          statusOf c @?= 201
+          pu <-
+            run1
+              app
+              ( sreq
+                  methodPut
+                  ("/api/playlists/" <> TE.encodeUtf8 slug0)
+                  ""
+                  (encode renameDto)
+                  [authHeader]
+              )
+          statusOf pu @?= 200
+          case bodyField "entry" pu of
+            Just (Object o) -> KM.lookup "slug" o @?= Just (String renameSlug)
+            other -> assertFailure ("нет entry в ответе PUT: " <> show other)
+          -- новый файл существует, старого нет
+          doesFileExist newNsp >>= (@?= True)
+          doesFileExist newMix >>= (@?= True)
+          doesFileExist oldNsp >>= (@?= False)
+          doesFileExist oldMix >>= (@?= False)
+          -- список без старого slug
+          l <- run1 app (sreq methodGet "/api/playlists" "" "" [authHeader])
+          entrySlugs l @?= [renameSlug]
+          -- старый slug больше не найден
+          g0 <-
+            run1 app (sreq methodGet ("/api/playlists/" <> TE.encodeUtf8 slug0) "" "" [authHeader])
+          statusOf g0 @?= 404
+          assertHasCode "not_found" g0
+          -- persisted state переехал на новый путь
+          rs <- readPublishedState cfg
+          [prSlug r | r <- rs] @?= [renameSlug]
+          fmap (fmap pfPath . prNsp) rs @?= [Just newNsp]
+          -- страница нового slug показывает новый путь
+          pg <-
+            run1 app (sreq methodGet ("/edit/" <> TE.encodeUtf8 renameSlug) "" "" [authHeader])
+          statusOf pg @?= 200
+          assertBool
+            "нет data-published=\"1\""
+            (bodyContains "data-published=\"1\"" pg)
+          assertBool
+            "нет data-published-path нового файла"
+            ( bodyContains
+                (LBS.fromStrict(TE.encodeUtf8 ("data-published-path=\"" <> T.pack newNsp <> "\"")))
+                pg
+            )
+          assertBool
+            "нет data-slug нового slug"
+            ( bodyContains
+                (LBS.fromStrict(TE.encodeUtf8 ("data-slug=\"" <> renameSlug <> "\"")))
+                pg
+            )
+    , testCase "cleanup_blocked (422): файлы без state не удаляются" $
+        withServer "put-rename-blocked" $ \app cfg -> do
+          -- пара записана мимо приложения: записи в state нет
+          let prev = "vneshniy"
+              oldNsp = scPlaylistsDir cfg </> (prev ++ ".nsp")
+              oldMix = scRulesDir cfg </> (prev ++ ".mix")
+              blockedDto = validDto {pdName = "Blocked E2E"}
+              blockedSlug = slugFromName (pdName blockedDto)
+          BS.writeFile
+            oldMix
+            (TE.encodeUtf8 "подборка \"Черновик\"\nгде все {\n  любимое\n}\n")
+          BS.writeFile oldNsp (compiledNsp validDto)
+          oldNsp0 <- BS.readFile oldNsp
+          oldMix0 <- BS.readFile oldMix
+          pu <-
+            run1
+              app
+              ( sreq
+                  methodPut
+                  ("/api/playlists/" <> TE.encodeUtf8 (T.pack prev))
+                  ""
+                  (encode blockedDto)
+                  [authHeader]
+              )
+          statusOf pu @?= 422
+          assertHasCode "cleanup_blocked" pu
+          -- файлы не тронуты, новый target не создан, state не появился
+          BS.readFile oldNsp >>= (@?= oldNsp0)
+          BS.readFile oldMix >>= (@?= oldMix0)
+          doesFileExist (scPlaylistsDir cfg </> (T.unpack blockedSlug ++ ".nsp"))
+            >>= (@?= False)
+          doesFileExist (scRulesDir cfg </> (T.unpack blockedSlug ++ ".mix"))
+            >>= (@?= False)
+          doesFileExist (stateFilePath cfg) >>= (@?= False)
+    ]
 
 ------------------------------------------------------------------------------
 -- External: только чтение
@@ -437,12 +565,16 @@ unitTests =
             422
         , statusCase "io_error -> 500" (StoreIo "x") 500
         , statusCase "partial_delete -> 500" (StorePartial "x") 500
+        , statusCase "cleanup_blocked -> 422" (StoreCleanupBlocked "x.nsp" "почему") 422
+        , statusCase "cleanup_failed -> 500" (StoreCleanupFailed "x.nsp" "почему") 500
         , codeCase "код not_found" (StoreNotFound "x") "not_found"
         , codeCase "код unsafe_slug" (StoreUnsafeSlug "x") "unsafe_slug"
         , codeCase "код unsafe_path" (StoreUnsafePath "x") "unsafe_path"
         , codeCase "код conflict" (StoreConflict "x") "conflict"
         , codeCase "код io_error" (StoreIo "x") "io_error"
         , codeCase "код partial_delete" (StorePartial "x") "partial_delete"
+        , codeCase "код cleanup_blocked" (StoreCleanupBlocked "x.nsp" "почему") "cleanup_blocked"
+        , codeCase "код cleanup_failed" (StoreCleanupFailed "x.nsp" "почему") "cleanup_failed"
         ]
     ]
 
@@ -457,6 +589,7 @@ serverTests =
     [ authTests
     , validateTests
     , lifecycleTests
+    , renameTests
     , externalTests
     , apiErrorTests
     , unitTests

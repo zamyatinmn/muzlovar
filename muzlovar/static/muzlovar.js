@@ -16,8 +16,10 @@
   var schema = null;
   var model = null;          // PlaylistDto
   var slug = null;           // null — новая подборка
+  var pendingSlug = null;    // slug из последней успешной проверки:
+                             // каким станет filename после публикации
   var editable = true;
-  var selectedGroup = '/root';
+  var selectedGroupId = null; // id группы-приёмника клика по палитре
   var validateTimer = null;
   var lastValidateOk = false;
 
@@ -40,7 +42,7 @@
       'e-preview-wrap', 'e-personal', 'e-save', 'e-publish', 'e-delete',
       'e-mix', 'e-nsp', 'toasts',
       'e-search', 'e-rules', 'e-validity', 'e-validity-text',
-      'e-path', 'e-path-edit', 'e-copy-mix', 'e-copy-preview', 'e-copy-nsp',
+      'e-path', 'e-copy-mix', 'e-copy-preview', 'e-copy-nsp',
       'pl-title', 'pl-meta', 'tab-rules', 'tab-mix',
       'conn-status', 'conn-text', 'settings-btn', 'settings-dialog'
     ].forEach(function (id) { els[id] = document.getElementById(id); });
@@ -235,20 +237,9 @@
   /* Пути DTO                                                            */
   /* ------------------------------------------------------------------ */
 
-  function groupAt(path) {
-    if (path === '/root') return model.root;
-    var parts = path.split('/').slice(1);   // ['root','items','2',...]
-    var g = model.root;
-    for (var i = 1; i < parts.length; i += 2) {
-      if (parts[i] !== 'items') return null;
-      var idx = parseInt(parts[i + 1], 10);
-      if (!g || !g.items || !g.items[idx]) return null;
-      var next = g.items[idx];
-      if (!next || next.type !== 'group') return null;
-      g = next;
-    }
-    return g;
-  }
+  /* Индексный путь нужен только кнопкам удаления (свежий рендер →
+   * путь актуален в момент клика). Перенос и приём клика работают по
+   * стабильным id (findGroupById/findItem) — см. раздел Drag & drop. */
 
   function removeItemAt(itemPath) {
     var parts = itemPath.split('/').slice(1); // root, items, i, [items, j...]
@@ -261,6 +252,56 @@
     }
     var idx = parseInt(parts[parts.length - 1], 10);
     return g.items.splice(idx, 1)[0];
+  }
+
+  /* Группа по стабильному id: во время drag индексные пути устаревают
+   * в момент переноса (снятие элемента меняет индексы всех соседей),
+   * поэтому цель переноса всегда определяется по id группы. */
+  function findGroupById(id) {
+    if (!id || !model || !model.root) return null;
+    if (model.root.id === id) return model.root;
+    var walk = function (items) {
+      for (var i = 0; i < items.length; i++) {
+        var it = items[i];
+        if (!it || it.type !== 'group') continue;
+        if (it.id === id) return it;
+        var r = walk(it.items || []);
+        if (r) return r;
+      }
+      return null;
+    };
+    return walk(model.root.items);
+  }
+
+  /* Вставить элемент в группу: в позицию «перед элементом beforeId»
+   * (null — в конец). Позиция задаётся id соседа, а не индексом. */
+  function insertIntoGroup(groupId, beforeId, item) {
+    var g = findGroupById(groupId);
+    if (!g) return false;
+    var idx = g.items.length;
+    if (beforeId) {
+      for (var i = 0; i < g.items.length; i++) {
+        if (g.items[i] && g.items[i].id === beforeId) { idx = i; break; }
+      }
+    }
+    g.items.splice(idx, 0, item);
+    return true;
+  }
+
+  /* Перетаскивается ли группа внутрь самой себя (или своего
+   * потомка): такой drop запрещён — иначе дерево разрывается. */
+  function groupIsInsideItem(itemId, groupId) {
+    var r = findItem(itemId);
+    if (!r || !r.item || r.item.type !== 'group') return false;
+    var walk = function (g) {
+      if (g.id === groupId) return true;
+      var items = g.items || [];
+      for (var i = 0; i < items.length; i++) {
+        if (items[i] && items[i].type === 'group' && walk(items[i])) return true;
+      }
+      return false;
+    };
+    return walk(r.item);
   }
 
   /* ------------------------------------------------------------------ */
@@ -277,7 +318,10 @@
     return 'it' + idSeq + '-' + Date.now().toString(36);
   }
 
+  /* id получают все узлы дерева, включая корневую группу: id — это
+   * единственная стабильная идентичность и элементов, и групп. */
   function ensureIds(dto) {
+    if (dto && dto.root && !dto.root.id) dto.root.id = newId();
     var walk = function (items) {
       (items || []).forEach(function (it) {
         if (!it.id) it.id = newId();
@@ -310,19 +354,16 @@
     return r.item;
   }
 
-  function insertItem(groupPath, index, item) {
-    var g = groupAt(groupPath);
-    if (!g) g = model.root;
-    if (index === null || index < 0 || index > g.items.length) g.items.push(item);
-    else g.items.splice(index, 0, item);
-  }
-
   function condPath(groupPath, index) {
     return groupPath + '/items/' + index;
   }
 
+  /* Выбранная для клика группа живёт по id: индексный путь перестаёт
+   * указывать на ту же группу после любого переноса соседей. */
   function recomputeSelected() {
-    if (!groupAt(selectedGroup)) selectedGroup = '/root';
+    if (!model) return;
+    ensureIds(model);
+    if (!findGroupById(selectedGroupId)) selectedGroupId = model.root.id;
   }
 
   /* ------------------------------------------------------------------ */
@@ -387,6 +428,7 @@
     var raw = els.editor.getAttribute('data-slug');
     slug = raw && raw.length ? raw : null;
     model = emptyModel();
+    initDrag();
 
     renderStatus('Загрузка…', 'loading');
 
@@ -498,28 +540,61 @@
     if (els['e-publish']) els['e-publish'].addEventListener('click', publish);
     if (els['e-save']) els['e-save'].addEventListener('click', function () { scheduleValidate(0); });
     if (els['e-delete']) els['e-delete'].addEventListener('click', confirmDelete);
-
-    // Путь публикации зависит от названия: «Изменить» ведёт в поле.
-    if (els['e-path-edit']) els['e-path-edit'].addEventListener('click', function () {
-      var nameInput = els['e-name'];
-      if (nameInput) {
-        nameInput.focus();
-        if (nameInput.select) nameInput.select();
-      }
-      toast('ok', 'Путь зависит от названия подборки — измените поле «Название».');
-    });
   }
 
-  /* Путь публикации: имя файла .nsp в каталоге Navidrome. */
+  /* Путь публикации — только информация (кнопки и редактирования нет).
+   * До первой публикации показывается настроенный каталог .nsp из
+   * конфигурации сервера (data-publish-dir), после — фактический путь
+   * опубликованного файла (data-published-path). Состояние
+   * публикации — data-published, см. updatePath. */
+  function publishDir() {
+    if (!els.editor) return '';
+    return els.editor.getAttribute('data-publish-dir') || '';
+  }
+
+  function isPublished() {
+    return !!els.editor && els.editor.getAttribute('data-published') === '1';
+  }
+
+  /* Фактический путь опубликованного .nsp (server-rendered, после
+   * публикации обновляется из ответа). */
+  function publishedPath() {
+    if (!els.editor) return '';
+    return els.editor.getAttribute('data-published-path') || '';
+  }
+
+  /* Склейка каталога и имени файла с разделителем, принятым в каталоге
+   * (на Windows путь конфигурации может быть обратными слэшами). */
+  function publishFilePath(name) {
+    var dir = publishDir();
+    if (!dir) return name;
+    var trimmed = dir.replace(/[\\\/]+$/, '');
+    if (!trimmed) return name;
+    var sep = trimmed.indexOf('\\') >= 0 && trimmed.indexOf('/') < 0 ? '\\' : '/';
+    return trimmed + sep + name;
+  }
+
+  /* Блок «Путь публикации»:
+   *  - не опубликована — только каталог;
+   *  - опубликована и filename не меняется — фактический путь;
+   *  - опубликована и новое название даёт другой filename — вторая
+   *    половина «Будет опубликовано» до следующей публикации. */
   function updatePath() {
     var p = els['e-path'];
     if (!p) return;
-    if (slug) {
-      p.textContent = slug + '.nsp';
-      p.classList.remove('muted');
+    var current = publishedPath();
+    if (!isPublished() || !current) {
+      p.textContent = publishDir() || '—';
+      return;
+    }
+    var next = pendingSlug ? pendingSlug + '.nsp' : '';
+    var curName = current.split(/[\\\/]/).pop();
+    if (next && next !== curName) {
+      p.textContent =
+        'Опубликовано:\n' + current +
+        '\n\nБудет опубликовано:\n' + publishFilePath(next);
     } else {
-      p.textContent = 'не опубликована — путь появится после публикации';
-      p.classList.add('muted');
+      p.textContent = current;
     }
   }
 
@@ -596,16 +671,6 @@
       b.fields.forEach(function (f) { list.appendChild(ingredientCard(f)); });
       section.appendChild(list);
       box.appendChild(section);
-
-      if (window.Sortable) {
-        window.Sortable.create(list, {
-          group: { name: 'palette', pull: 'clone', put: false },
-          sort: false,
-          animation: 120,
-          ghostClass: 'sortable-ghost',
-          chosenClass: 'sortable-chosen'
-        });
-      }
     });
 
     applySearch(els['e-search'] ? els['e-search'].value : '');
@@ -621,21 +686,22 @@
       card.appendChild(el('span', { class: 'ing-flag', text: 'личное', title: 'Персональное поле' }));
     }
     card.appendChild(el('span', { class: 'ing-handle', text: '⠿', 'aria-hidden': 'true' }));
-    // Клик обрабатывается делегированием на всём поле ингредиентов
-    // (bindPaletteClicks): после drag & drop в палитре может остаться
-    // клон карточки без собственных слушателей.
+    // Клик и drag обрабатываются делегированием (bindPaletteClicks,
+    // initDrag): слушатели на самой карточке не переживают перерисовку
+    // палитры, а во время drag карточка вообще не двигается в DOM.
     return card;
   }
 
   /* Клик по ингредиенту — доступная альтернатива перетаскиванию.
-   * Делегирование на всём поле: слушатели не переживают клонирование
-   * Sortable, поэтому клик работает и по клону, оставшемуся после drag. */
+   * Делегирование на всём поле: клик работает и после drag — флаг
+   * suppressClick гасит только клик, которым закончился drag. */
   function bindPaletteClicks() {
     var box = els['e-palette'];
     if (!box || box.getAttribute('data-click-bound') === '1') return;
     box.setAttribute('data-click-bound', '1');
     box.addEventListener('click', function (e) {
       if (!editable) return;
+      if (suppressClick) { suppressClick = false; return; }
       var node = e.target;
       var card = null;
       while (node && node !== box) {
@@ -645,8 +711,8 @@
       if (!card) return;
       var field = card.getAttribute('data-chip-field');
       if (!field) return;
-      insertItem(selectedGroup, null, defaultCond(field));
       recomputeSelected();
+      insertIntoGroup(selectedGroupId, null, defaultCond(field));
       renderTree();
       scheduleValidate(0);
     });
@@ -692,21 +758,9 @@
     var box = els['e-tree'];
     if (!box) return;
     ensureIds(model);
+    recomputeSelected();
     clear(box);
     box.appendChild(renderGroup(model.root, '/root', 0));
-
-    // Drop zone под условиями: принимает ингредиенты и условия.
-    var target = groupAt(selectedGroup) || model.root;
-    var dz = el('ul', { class: 'tree dropzone' });
-    dz.setAttribute('data-list-path', selectedGroup);
-    dz.setAttribute('data-append', '1');
-    dz.setAttribute(
-      'data-hint',
-      'Перетащите ингредиент сюда — группа «' + (target.kind === 'any' ? 'ЛЮБОЕ' : 'ВСЕ') + '»'
-    );
-    box.appendChild(dz);
-
-    bindSortables(box);
     renderRulesView();
   }
 
@@ -739,19 +793,24 @@
         title: 'Убрать группу', 'aria-label': 'Убрать группу',
         disabled: editable ? null : 'disabled',
         onclick: function () {
-          removeItemAt(path); selectedGroup = '/root';
+          removeItemAt(path);
+          selectedGroupId = model.root.id;
           renderTree(); scheduleValidate(0);
         }
       }));
     }
 
     head.appendChild(el('span', { class: 'spacer' }));
+    var picked = selectedGroupId === group.id;
     head.appendChild(el('button', {
-      class: 'small ghost quiet', type: 'button', text: 'Выбрать',
-      title: 'Новые ингредиенты будут добавлены сюда',
+      class: 'small ghost quiet pick' + (picked ? ' on' : ''),
+      type: 'button',
+      text: picked ? '✓ выбрана' : 'Выбрать',
+      'aria-pressed': picked ? 'true' : 'false',
+      title: 'Клик по ингредиенту добавит условие в конец этой группы',
       onclick: function () {
-        selectedGroup = path;
-        toast('ok', 'Группа выбрана: новые условия добавляются в неё.');
+        selectedGroupId = group.id;
+        toast('ok', 'Группа выбрана: клик по ингредиенту добавит условие сюда.');
         renderTree();
       }
     }));
@@ -759,8 +818,9 @@
       class: 'small add', type: 'button', text: '+ группа',
       disabled: editable ? null : 'disabled',
       onclick: function () {
-        group.items.push({ id: newId(), type: 'group', kind: 'any', items: [] });
-        selectedGroup = path + '/items/' + (group.items.length - 1);
+        var sub = { id: newId(), type: 'group', kind: 'any', items: [] };
+        group.items.push(sub);
+        selectedGroupId = sub.id;
         renderTree(); scheduleValidate(0);
       }
     }));
@@ -773,9 +833,6 @@
       }
     }));
 
-    if (selectedGroup === path) {
-      head.appendChild(el('span', { class: 'badge public', text: 'приёмник' }));
-    }
     return head;
   }
 
@@ -788,6 +845,9 @@
 
     var ul = el('ul', { class: 'tree' });
     ul.setAttribute('data-list-path', path);
+    // Группа-приёмник переноса определяется по стабильному id:
+    // индексный путь (data-list-path) — только для отладки и тестов.
+    ul.setAttribute('data-list-id', group.id || '');
 
     group.items.forEach(function (item, i) {
       var p = path + '/items/' + i;
@@ -1128,67 +1188,320 @@
   /* ------------------------------------------------------------------ */
   /* Drag & drop                                                         */
   /* ------------------------------------------------------------------ */
+  /*
+   * Перенос выполняется без единого изменения DOM дерева во время
+   * drag: курсор тянет фиксированный «призрак» (клон исходного узла,
+   * position: fixed), исходный узел лишь приглушается, а позицию
+   * вставки показывает отдельный индикатор — layout под курсором
+   * неподвижен, поэтому точка drop не «уезжает».
+   *
+   * Модель меняется ровно один раз — в pointerup — и только по
+   * стабильным id: элемент берётся по item.id, группа-приёмник — по
+   * group.id, а позиция задаётся id соседа «перед которым вставить»
+   * (beforeId, null — в конец). Индексные пути и названия полей в
+   * расчёте участвуют только как отладочные метки. Это убирает
+   * прежний конфликт: SortableJS переставлял узлы (и переносил клон
+   * карточки палитры) прямо во время drag, после чего onAdd/onEnd и
+   * полный re-render спорили об одних и тех же узлах и индексах.
+   */
 
-  function bindSortables(container) {
-    if (!window.Sortable) return;
-    container.querySelectorAll('ul.tree[data-list-path]').forEach(function (ul) {
-      var opts = {
-        group: { name: 'tree', put: ['tree', 'palette'] },
-        animation: 120,
-        ghostClass: 'sortable-ghost',
-        chosenClass: 'sortable-chosen',
-        disabled: !editable,
-        // Палитра → дерево: Sortable переносит original-карточку, а onEnd
-        // срабатывает на источнике (в палитре обработчика нет) — поэтому
-        // drop ингредиента обрабатывается здесь, когда Sortable закончит
-        // с DOM (события источника: onRemove/onEnd без обработчиков).
-        onAdd: function (evt) {
-          if (!evt.item) return;
-          // Перенос внутри дерева обрабатывается в onEnd источника.
-          if (evt.from && evt.from.getAttribute('data-list-path') !== null) return;
-          var chipField = evt.item.getAttribute('data-chip-field');
-          if (!chipField) return;
-          var target = evt.to;
-          var listPath = target.getAttribute('data-list-path');
-          var index = target.getAttribute('data-append') === '1' ? null : evt.newIndex;
-          var field = chipField;
-          setTimeout(function () {
-            insertItem(listPath, index, defaultCond(field));
-            recomputeSelected();
-            renderAll(); // перерисовка убирает посторонний DOM-узел из дерева
-            scheduleValidate(0);
-          }, 0);
-        },
-        onEnd: function (evt) {
-          // Drop zone принимает в конец списка.
-          var append = evt.to.getAttribute('data-append') === '1';
-          var chipField = evt.item.getAttribute('data-chip-field');
-          if (chipField) {
-            // Ингредиент из палитры — основной путь в onAdd; здесь страховка.
-            evt.item.parentNode && evt.item.parentNode.removeChild(evt.item);
-            insertItem(ul.getAttribute('data-list-path'), append ? null : evt.newIndex, defaultCond(chipField));
-            recomputeSelected();
-            renderAll(); scheduleValidate(0);
-            return;
-          }
-          // Перемещение внутри дерева: элемент ищется по стабильному id
-          // (индексный путь — запасной вариант).
-          var itemId = evt.item.getAttribute('data-id');
-          var itemPath = evt.item.getAttribute('data-path');
-          if (!itemId && !itemPath) { renderAll(); return; }
-          var target = evt.to.getAttribute('data-list-path');
-          var moved = itemId ? removeItemById(itemId) : removeItemAt(itemPath);
-          if (!moved) { renderAll(); return; }
-          insertItem(target, append ? null : evt.newIndex, moved);
-          recomputeSelected();
-          renderAll();
-          scheduleValidate(0);
-        }
-      };
-      // Перетаскивание вручную — за drag handle слева.
-      if (!ul.classList.contains('dropzone')) opts.handle = '.drag-handle';
-      window.Sortable.create(ul, opts);
+  var drag = null;           // активный перенос
+  var pendingDrag = null;    // нажатие, ещё не ставшее переносом
+  var suppressClick = false; // клик, которым закончился drag, не добавляет условие
+
+  function initDrag() {
+    document.addEventListener('pointerdown', onDragPointerDown);
+    document.addEventListener('pointermove', onDragPointerMove);
+    document.addEventListener('pointerup', onDragPointerUp);
+    document.addEventListener('pointercancel', function () { endDrag(); });
+    document.addEventListener('keydown', function (e) {
+      if (e.key !== 'Escape') return;
+      pendingDrag = null;
+      if (drag) endDrag();
     });
+  }
+
+  /* Источник переноса: карточка палитры целиком либо drag handle
+   * дерева — тогда узел определяется по ближайшему li[data-id]. */
+  function dragSourceAt(node) {
+    var n = node;
+    while (n && n.nodeType === 1) {
+      if (n.classList.contains('ing')) {
+        var field = n.getAttribute('data-chip-field');
+        return field ? { type: 'chip', field: field, el: n } : null;
+      }
+      if (n.classList.contains('drag-handle')) {
+        var li = n.parentNode;
+        while (li && li.nodeType === 1 &&
+               !(li.classList.contains('node') && li.getAttribute('data-id'))) {
+          li = li.parentNode;
+        }
+        if (li && li.nodeType === 1 && li.getAttribute('data-id')) {
+          return { type: 'item', id: li.getAttribute('data-id'), el: li };
+        }
+        return null; // handle корневой группы: переносить нечего
+      }
+      n = n.parentNode;
+    }
+    return null;
+  }
+
+  function onDragPointerDown(e) {
+    suppressClick = false;
+    if (drag || pendingDrag || !editable || !model || !schema) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    var src = dragSourceAt(e.target);
+    if (!src) return;
+    var r = src.el.getBoundingClientRect();
+    pendingDrag = {
+      type: src.type,
+      field: src.field,
+      id: src.id,
+      el: src.el,
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      grabX: e.clientX - r.left,
+      grabY: e.clientY - r.top,
+      width: r.width
+    };
+  }
+
+  function onDragPointerMove(e) {
+    if (drag) {
+      if (e.pointerId !== drag.pointerId) return;
+      e.preventDefault();
+      drag.lastX = e.clientX;
+      drag.lastY = e.clientY;
+      autoScroll(e.clientX, e.clientY);
+      refreshTarget(e.clientX, e.clientY);
+      moveGhost(e.clientX, e.clientY);
+      return;
+    }
+    if (!pendingDrag || e.pointerId !== pendingDrag.pointerId) return;
+    var dx = e.clientX - pendingDrag.startX;
+    var dy = e.clientY - pendingDrag.startY;
+    if (dx * dx + dy * dy < 36) return; // порог 6px: меньше — это клик
+    startDrag(e.clientX, e.clientY);
+  }
+
+  function startDrag(x, y) {
+    var src = pendingDrag;
+    pendingDrag = null;
+    if (!src || !src.el.isConnected) return;
+
+    var ghost = src.el.cloneNode(true);
+    ghost.classList.add('drag-ghost');
+    ghost.style.width = src.width + 'px';
+    stripIdentity(ghost);
+    document.body.appendChild(ghost);
+
+    var indicator = document.createElement('div');
+    indicator.className = 'drop-indicator hidden';
+    indicator.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(indicator);
+
+    if (src.type === 'item') src.el.classList.add('drag-source');
+
+    drag = {
+      type: src.type,
+      field: src.field,
+      id: src.id,
+      el: src.el,
+      pointerId: src.pointerId,
+      grabX: src.grabX,
+      grabY: src.grabY,
+      ghost: ghost,
+      indicator: indicator,
+      hoverGroup: null,
+      target: null,
+      lastX: x,
+      lastY: y
+    };
+    suppressClick = true;
+    document.body.classList.add('dragging');
+    window.addEventListener('scroll', onDragViewportChange, true);
+    window.addEventListener('resize', onDragViewportChange);
+    moveGhost(x, y);
+    refreshTarget(x, y);
+  }
+
+  /* В призраке не остаётся служебных атрибутов идентичности: во
+   * время тестов и отладки в документе нет второго узла с тем же id. */
+  function stripIdentity(root) {
+    var nodes = [root];
+    if (root.querySelectorAll) {
+      Array.prototype.forEach.call(root.querySelectorAll('[data-id]'), function (n) { nodes.push(n); });
+    }
+    nodes.forEach(function (n) {
+      ['data-id', 'data-path', 'data-list-id', 'data-list-path', 'data-chip-field']
+        .forEach(function (a) { n.removeAttribute(a); });
+    });
+  }
+
+  function moveGhost(x, y) {
+    drag.ghost.style.left = (x - drag.grabX) + 'px';
+    drag.ghost.style.top = (y - drag.grabY) + 'px';
+  }
+
+  function onDragPointerUp(e) {
+    if (!drag) { pendingDrag = null; return; }
+    if (e.pointerId !== drag.pointerId) return;
+    var t = drag.target;
+    applyDrop(t);
+    endDrag();
+  }
+
+  function endDrag() {
+    if (!drag) { pendingDrag = null; return; }
+    window.removeEventListener('scroll', onDragViewportChange, true);
+    window.removeEventListener('resize', onDragViewportChange);
+    removeNode(drag.ghost);
+    removeNode(drag.indicator);
+    if (drag.hoverGroup) drag.hoverGroup.classList.remove('drop-hover');
+    if (drag.el && drag.el.classList) drag.el.classList.remove('drag-source');
+    document.body.classList.remove('dragging');
+    drag = null;
+    pendingDrag = null;
+  }
+
+  function onDragViewportChange() {
+    if (drag) refreshTarget(drag.lastX, drag.lastY);
+  }
+
+  function removeNode(n) {
+    if (n && n.parentNode) n.parentNode.removeChild(n);
+  }
+
+  /* Автопрокрутка колонки дерева, когда курсор у края. */
+  function autoScroll(x, y) {
+    var host = els['e-tree'] ? els['e-tree'].parentElement : null;
+    if (!host) return;
+    var r = host.getBoundingClientRect();
+    if (y < r.top + 28) host.scrollTop -= 14;
+    else if (y > r.bottom - 28) host.scrollTop += 14;
+  }
+
+  function refreshTarget(x, y) {
+    var t = resolveTarget(x, y);
+    var group = t ? t.groupEl : null;
+    if (drag.hoverGroup !== group) {
+      if (drag.hoverGroup) drag.hoverGroup.classList.remove('drop-hover');
+      drag.hoverGroup = group;
+      if (group) group.classList.add('drop-hover');
+    }
+    drag.target = t;
+    if (!t) { drag.indicator.classList.add('hidden'); return; }
+    drag.indicator.classList.remove('hidden');
+    positionIndicator(t);
+  }
+
+  /* Точка вставки из координат курсора.
+   *
+   * Цель — самая вложенная группа, содержащая точку: её собственный
+   * ul.tree (шапка вложенной группы попадает в неё же, то есть drag
+   * на шапку вставляет в начало этой группы; шапка корня — в начало
+   * корня). Позиция — id первого узла списка, середина которого ниже
+   * курсора; если это сам переносимый узел, для модели берётся id его
+   * прежнего следующего соседа (после снятия узла «перед ним» и
+   * «перед своим следующим» — одна и та же позиция). */
+  function resolveTarget(x, y) {
+    var hit = document.elementFromPoint(x, y);
+    if (!hit || !hit.closest) return null;
+    var groupEl = hit.closest('.group');
+    if (!groupEl) return null;
+    var gr = groupEl.getBoundingClientRect();
+    if (x < gr.left || x > gr.right || y < gr.top || y > gr.bottom) return null;
+    var ul = groupEl.querySelector(':scope > ul.tree');
+    if (!ul) return null;
+    var groupId = ul.getAttribute('data-list-id');
+    if (!groupId || !findGroupById(groupId)) return null;
+    // Группа не может переноситься внутрь себя или своего потомка.
+    if (drag.type === 'item' && groupIsInsideItem(drag.id, groupId)) return null;
+
+    var visualId = null;
+    var children = ul.children;
+    for (var i = 0; i < children.length; i++) {
+      var ch = children[i];
+      if (!ch.classList || !ch.classList.contains('node')) continue;
+      var cr = ch.getBoundingClientRect();
+      if (y < cr.top + cr.height / 2) { visualId = ch.getAttribute('data-id'); break; }
+    }
+    var beforeId = visualId;
+    if (drag.type === 'item' && beforeId === drag.id) {
+      beforeId = nextSiblingItemId(ul, drag.el);
+    }
+    return { groupId: groupId, beforeId: beforeId, visualId: visualId, listEl: ul, groupEl: groupEl };
+  }
+
+  function nextSiblingItemId(ul, el) {
+    var n = el && el.parentNode === ul ? el.nextElementSibling : null;
+    while (n && !(n.classList && n.classList.contains('node'))) n = n.nextElementSibling;
+    return n ? (n.getAttribute('data-id') || null) : null;
+  }
+
+  function childNodeById(ul, id) {
+    var children = ul.children;
+    for (var i = 0; i < children.length; i++) {
+      var ch = children[i];
+      if (ch.classList && ch.classList.contains('node') && ch.getAttribute('data-id') === id) return ch;
+    }
+    return null;
+  }
+
+  function lastNodeChild(ul) {
+    var children = ul.children;
+    for (var i = children.length - 1; i >= 0; i--) {
+      var ch = children[i];
+      if (ch.classList && ch.classList.contains('node')) return ch;
+    }
+    return null;
+  }
+
+  /* Индикатор — линия ровно на границе вставки; сам он зафиксирован
+   * в viewport и ничего не сдвигает. */
+  function positionIndicator(t) {
+    var lr = t.listEl.getBoundingClientRect();
+    var y = null;
+    if (t.visualId) {
+      var c = childNodeById(t.listEl, t.visualId);
+      if (c) y = c.getBoundingClientRect().top - 8; // середина зазора
+    }
+    if (y === null) {
+      var last = lastNodeChild(t.listEl);
+      y = last ? last.getBoundingClientRect().bottom + 8 : lr.top + 1;
+    }
+    drag.indicator.style.left = lr.left + 'px';
+    drag.indicator.style.width = lr.width + 'px';
+    drag.indicator.style.top = (y - 1) + 'px';
+  }
+
+  /* Применение переноса к модели — один раз, в pointerup. */
+  function applyDrop(t) {
+    if (!t || !editable || !model) return;
+
+    if (drag.type === 'chip') {
+      if (!insertIntoGroup(t.groupId, t.beforeId, defaultCond(drag.field))) return;
+      renderTree();
+      scheduleValidate(0);
+      return;
+    }
+
+    var cur = findItem(drag.id);
+    if (!cur) return;
+    var target = findGroupById(t.groupId);
+    if (!target) return;
+    var nextId = cur.index + 1 < cur.list.length ? cur.list[cur.index + 1].id : null;
+    // Drop на прежнюю позицию — модель не меняется, DOM не трогаем.
+    if (cur.list === target.items && t.beforeId === nextId) return;
+    var moved = removeItemById(drag.id);
+    if (!moved) return;
+    if (!insertIntoGroup(t.groupId, t.beforeId, moved)) {
+      cur.list.splice(Math.min(cur.index, cur.list.length), 0, moved);
+      return;
+    }
+    renderTree();
+    scheduleValidate(0);
   }
 
   /* ------------------------------------------------------------------ */
@@ -1234,6 +1547,12 @@
           nspPre.textContent = '';
         }
       }
+      // Итоговый filename из текущего названия — блок «Путь публикации»
+      // показывает ожидающее переименование до публикации.
+      if (res.ok && res.data && typeof res.data.slug === 'string') {
+        pendingSlug = res.data.slug;
+      }
+      updatePath();
       setValidity(
         lastValidateOk ? 'ok' : 'err',
         lastValidateOk
@@ -1269,14 +1588,29 @@
     api(url, { method: slug ? 'PUT' : 'POST', body: model }).then(function (res) {
       if (res.ok) {
         toast('ok', 'Подборка опубликована: ' + (res.data.entry ? res.data.entry.name : ''));
-        var newSlug = res.data.entry ? res.data.entry.slug : slug;
-        if (!slug && newSlug) {
+        var entry = res.data.entry || null;
+        var newSlug = entry ? entry.slug : slug;
+        if (newSlug && newSlug !== slug) {
+          // Переименование: identity подборки и адрес страницы
+          // переезжают на новый filename.
           slug = newSlug;
+          if (els.editor) els.editor.setAttribute('data-slug', slug);
           window.history.replaceState({}, '', '/edit/' + encodeURIComponent(slug));
         }
         if (res.data.mix) els['e-mix'].value = res.data.mix;
         if (res.data.nsp) els['e-nsp'].value = res.data.nsp;
         renderErrors(els['e-errors'], [], '');
+        if (els.editor) {
+          els.editor.setAttribute('data-published', '1');
+          // После публикации показывается только новый фактический путь.
+          var nspName = (entry && entry.nspFile)
+            ? entry.nspFile
+            : (slug ? slug + '.nsp' : '');
+          if (nspName) {
+            els.editor.setAttribute('data-published-path', publishFilePath(nspName));
+          }
+        }
+        pendingSlug = slug;
         updatePath();
         return;
       }

@@ -15,6 +15,19 @@
 -- и выполняет замещение через 'renameFile' с резервной копией. При любой
 -- ошибке выполняется откат уже заменённых файлов.
 --
+-- Переименование опубликованной подборки (итоговый filename изменился):
+-- сначала пишутся новые файлы, и только после успешной записи удаляются
+-- старые. Старый @.nsp@ (и @.mix@) удаляется исключительно по persisted
+-- state — файлу @scRulesDir\/.muzlovar-published.json@ (см.
+-- 'stateFilePath'), в котором для каждой подборки лежат фактический путь
+-- и хеш записанного содержимого ('readPublishedState'). Если state
+-- не подтверждает принадлежность файла (нет записи, содержимое
+-- изменилось, символическая ссылка, путь вне каталога) — публикация
+-- отменяется до записи с ошибкой 'StoreCleanupBlocked'; файл остаётся
+-- на месте. Сбой удаления после записи новой пары — 'StoreCleanupFailed'
+-- (явная ошибка, не «успех»). Никогда не удаляется файл только потому,
+-- что вычисленное имя совпало.
+--
 -- Безопасность путей:
 --
 --   * slug допускает только строчные латинские буквы, цифры и дефисы
@@ -35,7 +48,15 @@ module Nspeller.Muzlovar.Store
 
     -- * Изменения
   , publishPlaylist
+  , publishPlaylistFrom
+  , publishPlaylistWith
   , deletePlaylistFiles
+
+    -- * Состояние публикации (persisted state)
+  , PublishedFile (..)
+  , PublishedRecord (..)
+  , readPublishedState
+  , stateFilePath
 
     -- * Корзина
   , TrashEntry (..)
@@ -60,11 +81,23 @@ module Nspeller.Muzlovar.Store
 import Control.Applicative (asum, (<|>))
 import Control.Exception (IOException, try)
 import Control.Monad (filterM, forM, forM_, void, when)
-import Data.Aeson (ToJSON (..), Value (..), eitherDecode, object, (.=))
+import Data.Aeson
+  ( FromJSON (..)
+  , ToJSON (..)
+  , Value (..)
+  , encode
+  , eitherDecode
+  , object
+  , withObject
+  , (.:)
+  , (.:?)
+  , (.=)
+  )
 import Data.Bifunctor (first)
+import Data.Bits (xor)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
-import Data.List (nub, sortOn)
+import Data.List (find, nub, sortOn)
 import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Ord (Down (..))
 import Data.Text (Text)
@@ -72,6 +105,8 @@ import qualified Data.Text as T
 import Data.Text.Encoding (decodeUtf8', encodeUtf8)
 import Data.Time.Clock (UTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
+import Data.Word (Word8, Word64)
+import Numeric (showHex)
 import Nspeller.Muzlovar.Types
   ( ApiError (..)
   , Compiled (..)
@@ -110,6 +145,7 @@ import System.FilePath
   , takeExtension
   , takeFileName
   )
+import System.IO.Error (isDoesNotExistError)
 
 ------------------------------------------------------------------------------
 -- Конфигурация
@@ -146,6 +182,13 @@ data StoreError
     -- ^ Ошибка ввода-вывода.
   | StorePartial Text
     -- ^ Частичный перенос в корзину: часть файлов вернуть не удалось.
+  | StoreCleanupBlocked FilePath Text
+    -- ^ Ранее опубликованный файл нельзя безопасно удалить (state не
+    -- подтверждает принадлежность): публикация отменена до записи,
+    -- файл оставлен на месте.
+  | StoreCleanupFailed FilePath Text
+    -- ^ Новый файл записан, но удаление старого опубликованного файла
+    -- не удалось: публикация завершается явной ошибкой, не «успехом».
   deriving (Eq, Show)
 
 -- | Код ошибки API для 'StoreError'.
@@ -158,6 +201,8 @@ storeErrorCode = \case
   StoreInvalid{} -> "validation_failed"
   StoreIo{} -> "io_error"
   StorePartial{} -> "partial_delete"
+  StoreCleanupBlocked{} -> "cleanup_blocked"
+  StoreCleanupFailed{} -> "cleanup_failed"
 
 -- | Русское сообщение для 'StoreError'.
 storeErrorMessage :: StoreError -> Text
@@ -176,6 +221,18 @@ storeErrorMessage = \case
     "Подборка «" <> s <> "» не прошла валидацию: " <> apiErrorsText es
   StoreIo m -> m
   StorePartial m -> m
+  StoreCleanupBlocked p why ->
+    "Невозможно безопасно удалить ранее опубликованный файл "
+      <> T.pack p
+      <> ": "
+      <> why
+      <> ". Файл оставлен на месте, публикация отменена."
+  StoreCleanupFailed p why ->
+    "Новый файл записан, но ранее опубликованный файл "
+      <> T.pack p
+      <> " удалить не удалось: "
+      <> why
+      <> ". Публикация не завершена — старый файл нужно удалить вручную."
 
 -- | Склеенные сообщения ошибок компиляции (со строкой и столбцом).
 apiErrorsText :: [ApiError] -> Text
@@ -792,6 +849,238 @@ readPlaylist cfg slug
                 }
 
 ------------------------------------------------------------------------------
+-- Состояние публикации (persisted state)
+------------------------------------------------------------------------------
+
+-- | Файл ранее опубликованной подборки: фактический путь на диске и
+-- хеш содержимого, записанный в момент публикации. Хеш — идентичность
+-- файла: без совпадения файл нельзя считать своим и удалять нельзя.
+data PublishedFile = PublishedFile
+  { pfPath :: FilePath
+    -- ^ Фактический путь записанного файла.
+  , pfHash :: Text
+    -- ^ FNV-1a 64 записанных байтов (hex).
+  }
+  deriving (Eq, Show)
+
+instance ToJSON PublishedFile where
+  toJSON f = object ["path" .= pfPath f, "hash" .= pfHash f]
+
+instance FromJSON PublishedFile where
+  parseJSON = withObject "PublishedFile" $ \o ->
+    PublishedFile <$> o .: "path" <*> o .: "hash"
+
+-- | Запись state об одной опубликованной подборке: slug (ключ) и
+-- фактические файлы @.nsp@/@.mix@ с хешами.
+data PublishedRecord = PublishedRecord
+  { prSlug :: Text
+  , prNsp :: Maybe PublishedFile
+  , prMix :: Maybe PublishedFile
+  }
+  deriving (Eq, Show)
+
+instance ToJSON PublishedRecord where
+  toJSON r =
+    object ["slug" .= prSlug r, "nsp" .= prNsp r, "mix" .= prMix r]
+
+instance FromJSON PublishedRecord where
+  parseJSON = withObject "PublishedRecord" $ \o ->
+    PublishedRecord <$> o .: "slug" <*> o .:? "nsp" <*> o .:? "mix"
+
+-- | JSON-документ state.
+newtype StateDoc = StateDoc [PublishedRecord]
+
+instance ToJSON StateDoc where
+  toJSON (StateDoc rs) = object ["playlists" .= rs]
+
+instance FromJSON StateDoc where
+  parseJSON = withObject "state" $ \o ->
+    StateDoc . fromMaybe [] <$> o .:? "playlists"
+
+-- | Путь persisted state: отдельный JSON рядом с правилами @.mix@
+-- (каталог принадлежит Muzlovar, не сканируется Navidrome и не
+-- попадает в списки @.mix@/@.nsp@). State читается с диска при каждой
+-- публикации — после рестарта сервера identity прежних файлов
+-- сохраняется.
+stateFilePath :: StoreConfig -> FilePath
+stateFilePath cfg = scRulesDir cfg </> ".muzlovar-published.json"
+
+-- | Прочитать persisted state; отсутствующий или битый файл — пустой
+-- state (тогда никакой старый файл не признаётся своим, и rename
+-- публикуется только с подтверждённой записью).
+readPublishedState :: StoreConfig -> IO [PublishedRecord]
+readPublishedState cfg = do
+  r <- try (BS.readFile (stateFilePath cfg)) :: IO (Either IOException BS.ByteString)
+  pure $ case r of
+    Left _ -> []
+    Right bs -> case eitherDecode (LBS.fromStrict bs) of
+      Right (StateDoc rs) -> rs
+      Left _ -> []
+
+-- | Записать persisted state атомарно (те же stage + rename, что и
+-- для @.mix@/@.nsp@).
+writePublishedState :: StoreConfig -> [PublishedRecord] -> IO (Either StoreError ())
+writePublishedState cfg records = do
+  c <- checkTarget (stateFilePath cfg)
+  case c of
+    Left e -> pure (Left e)
+    Right () ->
+      replaceFiles
+        [(stateFilePath cfg, LBS.toStrict (encode (StateDoc records)))]
+
+-- | FNV-1a 64 по байтам в hex — идентификатор содержимого файла.
+-- Некриптографический, но достаточный, чтобы отличить записанный нами
+-- файл от чужого или отредактированного вручную.
+fnv1a64 :: BS.ByteString -> Text
+fnv1a64 bs = T.pack (showHex (BS.foldl' step 0xcbf29ce484222325 bs) "")
+  where
+    step :: Word64 -> Word8 -> Word64
+    step h w = (h `xor` fromIntegral w) * 0x100000001b3
+
+-- | Хеш содержимого файла (Nothing — прочитать не удалось).
+fileHash :: FilePath -> IO (Maybe Text)
+fileHash p = do
+  r <- try (BS.readFile p) :: IO (Either IOException BS.ByteString)
+  pure (either (const Nothing) (Just . fnv1a64) r)
+
+-- | Результат проверки старого файла по persisted state.
+data OldStatus
+  = OldGone
+    -- ^ Файла нет — удалять нечего.
+  | OldOk
+    -- ^ Это действительно ранее опубликованный файл этой подборки.
+  | OldBlocked Text
+    -- ^ Подтвердить принадлежность нельзя (причина).
+
+-- | Проверка одного файла из state: существует, не символическая
+-- ссылка, имя совпадает с записанным, содержимое равно записанному
+-- хешу, каталог — текущий каталог публикации (для @.nsp@) или правил
+-- (для @.mix@).
+verifyOldFile :: FilePath -> FilePath -> PublishedFile -> IO OldStatus
+verifyOldFile expectedDir expectedName pf = do
+  let p = pfPath pf
+  ex <- doesFileExist p
+  if not ex
+    then pure OldGone
+    else do
+      linkR <- try (pathIsSymbolicLink p) :: IO (Either IOException Bool)
+      case linkR of
+        Left _ ->
+          pure (OldBlocked "не удалось проверить файл на символическую ссылку")
+        Right True -> pure (OldBlocked "файл является символической ссылкой")
+        Right False
+          | takeFileName p /= expectedName ->
+              pure (OldBlocked "имя файла не совпадает с записанным при публикации")
+          | otherwise -> do
+              mHash <- fileHash p
+              case mHash of
+                Nothing -> pure (OldBlocked "не удалось прочитать содержимое файла")
+                Just h
+                  | h /= pfHash pf ->
+                      pure
+                        ( OldBlocked
+                            "содержимое не совпадает с записанным при публикации"
+                        )
+                  | otherwise -> do
+                      cParent <-
+                        try (canonicalizePath (takeDirectory p)) ::
+                          IO (Either IOException FilePath)
+                      cDir <-
+                        try (canonicalizePath expectedDir) ::
+                          IO (Either IOException FilePath)
+                      pure $ case (cParent, cDir) of
+                        (Right a, Right b)
+                          | a == b -> OldOk
+                        _ ->
+                          OldBlocked "файл лежит вне настроенного каталога"
+
+-- | Составить список старых файлов, которые безопасно удалить можно
+-- (проверяется до записи новых файлов). Left — удалять нельзя:
+-- публикация отменяется до записи, ничего не изменяется.
+--
+-- @mixT@/@nspT@ — новые целевые файлы: записи, указывающие на них
+-- (перезапись того же пути), в cleanup не попадают — удалять только
+-- что записанный файл нельзя.
+planCleanup ::
+  StoreConfig ->
+  [PublishedRecord] ->
+  Maybe Text ->
+  Text ->
+  FilePath ->
+  FilePath ->
+  IO (Either StoreError [FilePath])
+planCleanup cfg state mPrev slug mixT nspT =
+  case mPrev of
+    Nothing -> pure (Right [])
+    Just prev
+      | not (slugReadable prev) -> pure (Left (StoreUnsafeSlug prev))
+      | prev == slug -> pure (Right [])
+      | otherwise ->
+          case find ((== prev) . prSlug) state of
+            Nothing -> do
+              -- Записи state нет: принадлежность старых файлов ничем
+              -- не подтверждается. Удалять нельзя — но и удалять нечего,
+              -- если файлов с прежним именем реально нет.
+              let oldNsp = nspPathOf cfg prev
+                  oldMix = mixPathOf cfg prev
+              hasOld <-
+                (||) <$> doesFileExist oldNsp <*> doesFileExist oldMix
+              pure $
+                if hasOld
+                  then
+                    Left
+                      ( StoreCleanupBlocked
+                          oldNsp
+                          "файл не зафиксирован в состоянии публикации — \
+                          \принадлежность подборке не подтверждена"
+                      )
+                  else Right []
+            Just rec -> do
+              let nspCands =
+                    [pf | Just pf <- [prNsp rec], pfPath pf /= nspT]
+                  mixCands =
+                    [pf | Just pf <- [prMix rec], pfPath pf /= mixT]
+                  nspName = T.unpack (prSlug rec) ++ ".nsp"
+                  mixName = T.unpack (prSlug rec) ++ ".mix"
+              nspStatuses <-
+                mapM
+                  (\pf -> (,) pf <$> verifyOldFile (scPlaylistsDir cfg) nspName pf)
+                  nspCands
+              mixStatuses <-
+                mapM
+                  (\pf -> (,) pf <$> verifyOldFile (scRulesDir cfg) mixName pf)
+                  mixCands
+              let statuses = nspStatuses ++ mixStatuses
+                  blocked =
+                    [(pfPath pf, why) | (pf, OldBlocked why) <- statuses]
+              case blocked of
+                (p, why) : _ ->
+                  -- Первый непроверяемый файл (.nsp — приоритетнее)
+                  -- останавливает публикацию целиком.
+                  pure (Left (StoreCleanupBlocked p why))
+                [] ->
+                  pure
+                    ( Right
+                        [pfPath pf | (pf, OldOk) <- statuses]
+                    )
+
+-- | Удаление старых файлов после успешной записи новых. Сбой любого
+-- удаления — 'StoreCleanupFailed' (новый файл уже записан, состояние
+-- не «успех»). Отсутствующий к моменту удаления файл не ошибка.
+runCleanup :: (FilePath -> IO ()) -> [FilePath] -> IO (Either StoreError ())
+runCleanup removeFn = go
+  where
+    go [] = pure (Right ())
+    go (p : ps) = do
+      r <- try (removeFn p) :: IO (Either IOException ())
+      case r of
+        Right () -> go ps
+        Left e
+          | isDoesNotExistError e -> go ps
+          | otherwise ->
+              pure (Left (StoreCleanupFailed p (T.pack (show e))))
+
+------------------------------------------------------------------------------
 -- Публикация
 ------------------------------------------------------------------------------
 
@@ -806,7 +1095,35 @@ publishPlaylist ::
   Bool ->
   PlaylistDto ->
   IO (Either StoreError PlaylistDetail)
-publishPlaylist cfg slug overwrite dto = do
+publishPlaylist cfg = publishPlaylistFrom cfg Nothing
+
+-- | Публикация с указанием прежнего slug подборки (из адреса
+-- @PUT /api/playlists/:slug@). Если итоговый slug изменился
+-- (переименование), после успешной записи новых файлов удаляются
+-- прежние @.nsp@/@.mix@ — только те, что подтверждены persisted state
+-- ('readPublishedState'). Без подтверждения — 'StoreCleanupBlocked'
+-- до записи; сбой удаления — 'StoreCleanupFailed' после записи.
+publishPlaylistFrom ::
+  StoreConfig ->
+  Maybe Text ->
+  Text ->
+  Bool ->
+  PlaylistDto ->
+  IO (Either StoreError PlaylistDetail)
+publishPlaylistFrom cfg mPrev = publishPlaylistWith removeFile cfg mPrev
+
+-- | Как 'publishPlaylistFrom', но с подменяемым удалением старых
+-- файлов — шов для тестов: позволяет воспроизвести сбой cleanup,
+-- не завися от ОС и прав на файлы.
+publishPlaylistWith ::
+  (FilePath -> IO ()) ->
+  StoreConfig ->
+  Maybe Text ->
+  Text ->
+  Bool ->
+  PlaylistDto ->
+  IO (Either StoreError PlaylistDetail)
+publishPlaylistWith removeFn cfg mPrev slug overwrite dto = do
   ed <- ensureStoreDirs cfg
   case ed of
     Left e -> pure (Left e)
@@ -831,14 +1148,50 @@ publishPlaylist cfg slug overwrite dto = do
                       Left errs -> pure (Left (StoreInvalid slug errs))
                       Right compiled -> do
                         let mixBs = encodeUtf8 (cmpMix compiled)
-                            nspBs = strictNsp (cmpNsp compiled)
-                        r <-
-                          replaceFiles [(mixT, mixBs), (nspT, nspBs)]
-                        case r of
+                            nspBs = LBS.toStrict (cmpNsp compiled)
+                        -- Cleanup-план считается до записи: небезопасный
+                        -- старый файл отменяет публикацию без изменений.
+                        state <- readPublishedState cfg
+                        planned <-
+                          planCleanup cfg state mPrev slug mixT nspT
+                        case planned of
                           Left e -> pure (Left e)
-                          Right () -> readPlaylist cfg slug
-  where
-    strictNsp = LBS.toStrict
+                          Right oldFiles -> do
+                            w <-
+                              replaceFiles [(mixT, mixBs), (nspT, nspBs)]
+                            case w of
+                              -- Ошибка записи: старые файлы не тронуты
+                              -- (они лежат по другим путям, замещение
+                              -- идёт поэтапно с откатом).
+                              Left e -> pure (Left e)
+                              Right () -> do
+                                cleaned <- runCleanup removeFn oldFiles
+                                case cleaned of
+                                  Left e -> pure (Left e)
+                                  Right () -> do
+                                    let rec =
+                                          PublishedRecord
+                                            { prSlug = slug
+                                            , prNsp =
+                                                Just
+                                                  (PublishedFile nspT (fnv1a64 nspBs))
+                                            , prMix =
+                                                Just
+                                                  (PublishedFile mixT (fnv1a64 mixBs))
+                                            }
+                                        -- Переименование переносит
+                                        -- identity: прежний ключ state
+                                        -- больше не указывает на файлы.
+                                        kept =
+                                          [ r
+                                          | r <- state
+                                          , prSlug r /= slug
+                                          , Just (prSlug r) /= mPrev
+                                          ]
+                                    sw <- writePublishedState cfg (rec : kept)
+                                    case sw of
+                                      Left e -> pure (Left e)
+                                      Right () -> readPlaylist cfg slug
 
 ------------------------------------------------------------------------------
 -- Удаление в корзину

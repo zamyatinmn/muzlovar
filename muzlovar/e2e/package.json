@@ -1,0 +1,12 @@
+{
+  "name": "muzlovar-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node run.mjs",
+    "test:publish-rename": "node publish-rename.mjs"
+  },
+  "dependencies": {
+    "playwright-core": "1.62.1"
+  }
+}

@@ -301,7 +301,6 @@ main.main-full { max-width: none; padding: 14px; display: flex; }
 }
 
 .foot-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.foot-field:first-child { flex: 1 1 200px; }
 .foot-label {
   font-size: 13px;
   font-weight: 600;
@@ -309,6 +308,29 @@ main.main-full { max-width: none; padding: 14px; display: flex; }
 }
 .foot-check { flex-direction: row; align-items: center; gap: 8px; }
 .foot-check label { font-size: 14px; color: var(--fg-dim); cursor: pointer; }
+
+/* Компактная строка параметров результата — сразу после «Название»
+ * и «Описание», до конструктора правил: «Порядок · Лимит · Публичная»
+ * одной строкой, на узком экране — с переносом. */
+.result-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 18px;
+  padding: 10px 12px;
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.result-row .foot-field,
+.result-row .foot-field:first-child {
+  flex: 0 1 auto;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.result-row .foot-label { white-space: nowrap; }
+.result-row input[type="number"] { width: 13ch; }
 
 @media (max-width: 1180px) {
   main.main-full { display: block; overflow: visible; }
@@ -353,6 +375,7 @@ main.main-full { max-width: none; padding: 14px; display: flex; }
   font-size: 14px;
   cursor: grab;
   user-select: none;
+  touch-action: none;
 }
 .ing:hover { border-color: var(--line); background: var(--bg-hover); }
 .ing:active { cursor: grabbing; }
@@ -461,6 +484,13 @@ main.main-full { max-width: none; padding: 14px; display: flex; }
 .group-head .count { font-size: 12.5px; color: var(--fg-faint); }
 .group-head .spacer { flex: 1 1 auto; }
 .group-head .badge { margin-left: 2px; }
+/* Выбранная для клика группа: подсветка самой кнопки вместо бейджа
+ * «приёмник», который был нужен нижней drop-zone. */
+.group-head .pick.on {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
 
 /* Списки условий: вложенность — отступ + вертикальная guide-линия. */
 .tree { list-style: none; margin: 0; padding: 0; }
@@ -481,6 +511,7 @@ main.main-full { max-width: none; padding: 14px; display: flex; }
   line-height: 1;
   cursor: grab;
   user-select: none;
+  touch-action: none;
   padding: 3px;
 }
 .drag-handle:hover { color: var(--fg-dim); }
@@ -520,28 +551,63 @@ main.main-full { max-width: none; padding: 14px; display: flex; }
 .cond.raw { border-color: color-mix(in srgb, var(--raw) 55%, var(--line)); }
 .cond .raw-note { color: var(--raw); font-size: 12.5px; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 34ch; }
 
-/* Drop zone под условиями. */
-.dropzone {
-  margin-top: 12px;
-  min-height: 56px;
-  padding: 10px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-  border: 1px dashed var(--line-strong);
-  border-radius: var(--radius-sm);
-  background: transparent;
-}
-.dropzone::before {
-  content: attr(data-hint);
-  font-size: 13px;
-  color: var(--fg-faint);
-}
-.dropzone:hover { border-color: var(--accent); }
+/* Drop zone под условиями — удалена вместе с workaround «перетащите
+ * сюда»: ингредиент и условие переносятся прямо в точку дерева,
+ * см. Drag & drop в muzlovar.js. */
 
-.sortable-ghost { opacity: .35; }
-.sortable-chosen { outline: 1px solid var(--accent); }
+/* ------------------------------------------------------------------ */
+/* Drag & drop: призрак узла и индикатор точки вставки                 */
+/* ------------------------------------------------------------------ */
+
+/* Во время переноса DOM дерева не меняется: тяжёлую работу делают
+ * призрак (fixed-клон) и линия-индикатор, оба вне потока документа. */
+body.dragging { user-select: none; }
+body.dragging, body.dragging * { cursor: grabbing !important; }
+
+.drag-ghost {
+  position: fixed;
+  z-index: 900;
+  margin: 0;
+  list-style: none;
+  pointer-events: none;
+  opacity: .92;
+  background: var(--bg-raised);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-xs);
+  box-shadow: 0 14px 30px rgba(0, 0, 0, .45);
+  max-width: 90vw;
+}
+
+/* Исходный узел остаётся на своём месте — только приглушается. */
+.drag-source { opacity: .3; }
+
+.drop-indicator {
+  position: fixed;
+  z-index: 901;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent),
+    0 0 10px color-mix(in srgb, var(--accent) 55%, transparent);
+  pointer-events: none;
+}
+.drop-indicator::before {
+  content: '';
+  position: absolute;
+  left: -3px;
+  top: -2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.drop-indicator.hidden { display: none; }
+
+/* Подсветка группы под курсором — только тень, layout не двигается. */
+.group.drop-hover {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 60%, transparent);
+}
 
 /* Нижняя панель: порядок и лимит. */
 .sort-box { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
@@ -703,8 +769,9 @@ pre.code:empty { display: none; }
   border-radius: var(--radius-xs);
   padding: 9px 11px;
   overflow-wrap: anywhere;
+  /* Две половины «Опубликовано / Будет опубликовано» с пустой строкой. */
+  white-space: pre-line;
 }
-.path.muted { color: var(--fg-faint); }
 
 .validity { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--fg-dim); }
 .validity .vdot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg-faint); flex: 0 0 auto; }

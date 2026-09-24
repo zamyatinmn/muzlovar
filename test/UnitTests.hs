@@ -29,13 +29,16 @@ i = id
 
 -- | Подборка с одним условием внутри @где все@.
 wrap :: Text -> Text
-wrap cond =
-  T.unlines
-    [ "подборка \"Тест\""
-    , "где все {"
-    , "  " <> cond
-    , "}"
-    ]
+wrap cond = wrapGroup "все" [cond]
+
+-- | Подборка с условиями внутри группы заданного вида («все» или
+-- «любое»).
+wrapGroup :: Text -> [Text] -> Text
+wrapGroup kind conds =
+  T.unlines $
+    ["подборка \"Тест\"", "где " <> kind <> " {"]
+      ++ map ("  " <>) conds
+      ++ ["}"]
 
 renderAll :: [CompileError] -> Text
 renderAll = T.intercalate "\n\n" . map renderCompileError
@@ -72,6 +75,25 @@ assertErrorPos name src expectedPos = testCase name $
     Right _ -> assertFailure "ожидалась ошибка компиляции, но файл валиден"
     Left (e : _) -> cePos e @?= Just expectedPos
     Left [] -> assertFailure "список ошибок пуст"
+
+-- | Источник должен скомпилироваться без ошибок.
+assertValid :: TestName -> Text -> TestTree
+assertValid name src = testCase name $
+  case compileText "test.mix" src of
+    Left errs -> assertFailure ("ошибка компиляции:\n" <> T.unpack (renderAll errs))
+    Right _ -> pure ()
+
+-- | Источник должен завершиться ошибкой ровно с данным числом
+-- диагностик.
+assertErrorCount :: TestName -> Text -> Int -> TestTree
+assertErrorCount name src expected = testCase name $
+  case compileText "test.mix" src of
+    Right _ -> assertFailure "ожидалась ошибка компиляции, но файл валиден"
+    Left errs ->
+      assertEqual
+        ("получено:\n" <> T.unpack (renderAll errs))
+        expected
+        (length errs)
 
 -- | JSON не должен содержать перечисленных ключей.
 assertLacksKeys :: TestName -> Text -> [Key] -> TestTree
@@ -543,6 +565,168 @@ errorTests =
     ]
 
 ------------------------------------------------------------------------------
+-- Семантика: непротиворечивость условий
+------------------------------------------------------------------------------
+
+-- | Конфликт условия корневой группы с условием во вложенной
+-- «любое»:-worlds разворачиваются, конфликт виден только в одной
+-- из альтернатив.
+nestedConflictSrc :: Text
+nestedConflictSrc =
+  T.unlines
+    [ "подборка \"Тест\""
+    , "где все {"
+    , "  год > 2020"
+    , "  любое {"
+    , "    год < 2000"
+    , "    жанр = \"rock\""
+    , "  }"
+    , "}"
+    ]
+
+-- | Одно и то же противоречие видно и во вложенной группе, и в
+-- родительской: ошибка должна быть ровно одна.
+dedupSrc :: Text
+dedupSrc =
+  T.unlines
+    [ "подборка \"Тест\""
+    , "где все {"
+    , "  все {"
+    , "    год > 2020"
+    , "    год < 2000"
+    , "  }"
+    , "}"
+    ]
+
+-- | Противоречивая ветвь внутри «любое»: сама по себе она
+-- невыполнима, поэтому ошибка есть.
+anyDeadBranchSrc :: Text
+anyDeadBranchSrc =
+  T.unlines
+    [ "подборка \"Тест\""
+    , "где любое {"
+    , "  все {"
+    , "    год > 2020"
+    , "    год < 2000"
+    , "  }"
+    , "  любимое"
+    , "}"
+    ]
+
+-- | Четыре группы «любое» по 10 альтернатив: 10 000 миров больше
+-- лимита 'maxWorlds', проверка собственных миров пропускается —
+-- файл обязан остаться валидным (никаких ложных срабатываний).
+explosionSrc :: Text
+explosionSrc =
+  T.unlines $
+    ["подборка \"Тест\"", "где все {"]
+      ++ concat
+        [ ["  любое {"]
+            ++ ["    год > " <> T.pack (show (2000 + n)) | n <- [1 .. 10 :: Int]]
+            ++ ["  }"]
+        | _ <- [1 .. 4 :: Int]
+        ]
+      ++ ["}"]
+
+semanticTests :: TestTree
+semanticTests =
+  testGroup
+    "Семантика: непротиворечивость"
+    [ assertCompilesTo
+        "любое: встречные границы валидны"
+        (wrapGroup "любое" ["год > 2020", "год < 2000"])
+        ( object
+            [ "name" .= t "Тест"
+            ,
+              "any"
+                .= [ object ["gt" .= object ["year" .= i 2020]]
+                   , object ["lt" .= object ["year" .= i 2000]]
+                   ]
+            ]
+        )
+    , assertErrorContains
+        "все: встречные границы - противоречие"
+        (wrapGroup "все" ["год > 2020", "год < 2000"])
+        "противоречит условию"
+    , assertErrorPos
+        "все: ошибка указывает на второе условие"
+        (wrapGroup "все" ["год > 2020", "год < 2000"])
+        (4, 3)
+    , assertErrorContains
+        "все: границы без разрыва между целыми"
+        (wrapGroup "все" ["год > 1980", "год < 1981"])
+        "противоречит условию"
+    , assertErrorContains
+        "все: диапазон не пересекается с >"
+        (wrapGroup "все" ["год между 1980 и 1989", "год > 2020"])
+        "противоречит условию"
+    , assertErrorContains
+        "все: два разных равенства текста"
+        (wrapGroup "все" ["жанр = \"rock\"", "жанр = \"jazz\""])
+        "противоречит условию"
+    , assertErrorContains
+        "все: = и != одного значения (текст)"
+        (wrapGroup "все" ["жанр = \"rock\"", "жанр != \"rock\""])
+        "противоречит условию"
+    , assertErrorContains
+        "все: = и != одного значения (число)"
+        (wrapGroup "все" ["год = 2000", "год != 2000"])
+        "противоречит условию"
+    , assertErrorContains
+        "все: диапазон из одного запрещённого числа"
+        (wrapGroup "все" ["год между 2000 и 2000", "год != 2000"])
+        "противоречит условию"
+    , assertErrorContains
+        "все: булево поле и противоположное значение"
+        (wrapGroup "все" ["любимое", "любимое = нет"])
+        "противоречит условию"
+    , assertErrorContains
+        "все: присутствует и отсутствует"
+        (wrapGroup "все" ["replaygain присутствует", "replaygain отсутствует"])
+        "противоречит условию"
+    , assertErrorContains
+        "все: содержит и не содержит одно и то же"
+        (wrapGroup "все" ["жанр содержит \"rock\"", "жанр не содержит \"rock\""])
+        "противоречит условию"
+    , assertErrorContains
+        "все: несравнимые префиксы"
+        (wrapGroup "все" ["жанр начинается с \"ab\"", "жанр начинается с \"cd\""])
+        "противоречит условию"
+    , assertErrorContains
+        "все: каждая пара возможна, совокупность - нет"
+        (wrapGroup "все" ["год != 2000", "год != 2001", "год между 2000 и 2001"])
+        "Условия поля «год» не могут выполняться одновременно"
+    , assertErrorContains
+        "пустое значение = (текст)"
+        (wrap "название = \"\"")
+        "требует непустое текстовое значение"
+    , assertCompilesTo
+        "пустое значение != допустимо"
+        (wrap "название != \"\"")
+        (object ["name" .= t "Тест", "all" .= [object ["isNot" .= object ["title" .= t ""]]]])
+    , assertValid
+        "разные поля не конфликтуют"
+        (wrapGroup "все" ["год > 2020", "оценка < 2"])
+    , assertErrorCount
+        "вложенные группы: конфликт между подгруппами - одна ошибка"
+        nestedConflictSrc
+        1
+    , assertErrorPos
+        "вложенные группы: позиция на конфликтующем условии"
+        nestedConflictSrc
+        (5, 5)
+    , assertErrorCount
+        "дедупликация: вложенная группа не даёт второй ошибки"
+        dedupSrc
+        1
+    , assertErrorCount
+        "любое с невыполнимой ветвью - ошибка"
+        anyDeadBranchSrc
+        1
+    , assertValid "взрыв комбинаций не даёт ложных ошибок" explosionSrc
+    ]
+
+------------------------------------------------------------------------------
 -- Итоговый набор
 ------------------------------------------------------------------------------
 
@@ -554,5 +738,6 @@ unitTests =
     , operatorTests
     , groupTests
     , metadataTests
+    , semanticTests
     , errorTests
     ]

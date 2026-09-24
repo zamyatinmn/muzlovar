@@ -6,11 +6,12 @@
 -- символических ссылок.
 module StoreTests (withTempStore, storeTests) where
 
-import Control.Exception (IOException, bracket, try)
+import Control.Exception (IOException, bracket, throwIO, try)
 import Control.Monad (forM_, when)
 import Data.Aeson (toJSON)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
+import Data.List (sort)
 import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -25,9 +26,11 @@ import System.Directory
   , doesPathExist
   , getTemporaryDirectory
   , listDirectory
+  , removeDirectory
   , removeDirectoryRecursive
+  , removeFile
   )
-import System.FilePath ((</>), takeExtension)
+import System.FilePath ((</>), takeExtension, takeFileName)
 import Test.Tasty (TestTree, testGroup)
 import Test.Tasty.HUnit
 
@@ -141,9 +144,34 @@ compileNsp dto = case compilePlaylistDto dto of
   Left es -> assertFailure ("compilePlaylistDto: " <> show es)
   Right c -> pure (LBS.toStrict (cmpNsp c))
 
--- | Файлы только с ожидаемыми расширениями (нет @.tmp@/@.bak@).
-onlyFinalFiles :: [FilePath] -> Bool
-onlyFinalFiles = all ((`elem` [".mix", ".nsp"]) . takeExtension)
+-- | Файлы только с ожидаемыми именами: @.mix@/@.nsp@ и persisted
+-- state публикации (нет остатков @.tmp@/@.bak@).
+onlyFinalFiles :: StoreConfig -> [FilePath] -> Bool
+onlyFinalFiles cfg = all ok
+  where
+    ok f =
+      f == takeFileName (stateFilePath cfg)
+        || takeExtension f `elem` [".mix", ".nsp"]
+
+-- | Проверить существование/отсутствие файлов: @(путь, должен существовать)@.
+assertFiles :: [(FilePath, Bool)] -> Assertion
+assertFiles = mapM_ check
+  where
+    check (p, want) = do
+      ex <- doesFileExist p
+      assertBool
+        (p <> ": ожидалось exist=" <> show want <> ", фактически " <> show ex)
+        (ex == want)
+
+-- | В каталогах не осталось служебных файлов (@.tmp@/@.bak@), а есть
+-- только @.mix@/@.nsp@ и persisted state публикации.
+assertNoLeftovers :: StoreConfig -> Assertion
+assertNoLeftovers cfg = do
+  rules <- listDirectory (scRulesDir cfg)
+  playlists <- listDirectory (scPlaylistsDir cfg)
+  assertBool
+    ("лишние файлы: " <> show (rules ++ playlists))
+    (onlyFinalFiles cfg rules && onlyFinalFiles cfg playlists)
 
 ------------------------------------------------------------------------------
 -- Тестовая подборка
@@ -170,6 +198,45 @@ sampleSlug :: Text
 sampleSlug = slugFromName (pdName sampleDto)
 
 ------------------------------------------------------------------------------
+-- Переименование опубликованной подборки: помощники
+------------------------------------------------------------------------------
+
+-- | Новое название для тестов переименования: slug всегда вычисляется
+-- из названия, как это делает PUT /api/playlists/:slug.
+renameNewName :: Text
+renameNewName = "Новое Название"
+
+-- | Slug, который получит подборка после переименования.
+renameNewSlug :: Text
+renameNewSlug = slugFromName renameNewName
+
+-- | DTO с заданным названием (slug — следствие названия).
+dtoNamed :: Text -> PlaylistDto
+dtoNamed name = sampleDto {pdName = name}
+
+-- | Публикация с указанием прежнего slug (PUT-семантика); неудача —
+-- падение теста с сообщением ошибки.
+publishFromOk ::
+  StoreConfig -> Maybe Text -> Text -> Bool -> PlaylistDto -> IO PlaylistDetail
+publishFromOk cfg mPrev slug overwrite dto = do
+  r <- publishPlaylistFrom cfg mPrev slug overwrite dto
+  case r of
+    Left e ->
+      assertFailure ("публикация не удалась: " <> T.unpack (storeErrorMessage e))
+    Right d -> pure d
+
+-- | Ожидается отказ cleanup_blocked именно по этому файлу: публикация
+-- отменена до записи.
+expectBlocked :: FilePath -> IO (Either StoreError a) -> Assertion
+expectBlocked want act = do
+  r <- act
+  case r of
+    Left (StoreCleanupBlocked p _) -> p @?= want
+    Left e ->
+      assertFailure ("ожидался StoreCleanupBlocked, получено: " <> show e)
+    Right _ -> assertFailure "ожидался StoreCleanupBlocked, публикация прошла"
+
+------------------------------------------------------------------------------
 -- Публикация
 ------------------------------------------------------------------------------
 
@@ -186,7 +253,7 @@ publishTests =
           playlists <- listDirectory (scPlaylistsDir cfg)
           assertBool
             ("остались служебные файлы: " <> show (rules ++ playlists))
-            (onlyFinalFiles rules && onlyFinalFiles playlists)
+            (onlyFinalFiles cfg rules && onlyFinalFiles cfg playlists)
           entries <- listOk cfg
           e <- entryFor entries sampleSlug
           peStatus e @?= "managed"
@@ -421,6 +488,251 @@ symlinkTest = testCase "символическая ссылка блокируе
               ("ожидался StoreUnsafePath, получено: " <> show other)
 
 ------------------------------------------------------------------------------
+-- Переименование опубликованной подборки
+------------------------------------------------------------------------------
+
+renameTests :: TestTree
+renameTests =
+  testGroup
+    "Переименование опубликованной подборки"
+    [ testCase "обычный rename: новый файл есть, старого нет, state переехал" $
+        withTempStore "rename" $ \cfg -> do
+          _ <- publishOk cfg sampleSlug sampleDto
+          _ <-
+            publishFromOk cfg (Just sampleSlug) renameNewSlug False (dtoNamed renameNewName)
+          assertFiles
+            [ (nspFile cfg sampleSlug, False)
+            , (mixPath cfg sampleSlug, False)
+            , (nspFile cfg renameNewSlug, True)
+            , (mixPath cfg renameNewSlug, True)
+            ]
+          assertNoLeftovers cfg
+          -- двух подборок не появилось
+          entries <- listOk cfg
+          [peSlug e | e <- entries] @?= [renameNewSlug]
+          d <- readOk cfg renameNewSlug
+          fmap pdName (pdDto d) @?= Just renameNewName
+          rs <- readPublishedState cfg
+          case [r | r <- rs, prSlug r == renameNewSlug] of
+            [r] -> do
+              fmap pfPath (prNsp r) @?= Just (nspFile cfg renameNewSlug)
+              fmap pfPath (prMix r) @?= Just (mixPath cfg renameNewSlug)
+            other ->
+              assertFailure ("нет записи state нового slug: " <> show other)
+          [prSlug r | r <- rs, prSlug r /= renameNewSlug] @?= []
+    , testCase "несколько последовательных rename: остаётся только последний" $
+        withTempStore "rename-seq" $ \cfg -> do
+          let s1 = renameNewSlug
+              s2 = slugFromName "Третий Вариант"
+              s3 = slugFromName "Четвёртый Набор"
+          _ <- publishOk cfg sampleSlug sampleDto
+          _ <- publishFromOk cfg (Just sampleSlug) s1 False (dtoNamed renameNewName)
+          _ <- publishFromOk cfg (Just s1) s2 False (dtoNamed "Третий Вариант")
+          _ <- publishFromOk cfg (Just s2) s3 False (dtoNamed "Четвёртый Набор")
+          assertFiles
+            [ (nspFile cfg sampleSlug, False)
+            , (mixPath cfg sampleSlug, False)
+            , (nspFile cfg s1, False)
+            , (mixPath cfg s1, False)
+            , (nspFile cfg s2, False)
+            , (mixPath cfg s2, False)
+            , (nspFile cfg s3, True)
+            , (mixPath cfg s3, True)
+            ]
+          assertNoLeftovers cfg
+          entries <- listOk cfg
+          [peSlug e | e <- entries] @?= [s3]
+          rs <- readPublishedState cfg
+          [prSlug r | r <- rs] @?= [s3]
+    , testCase "смена названия без смены filename: перезапись на месте" $
+        withTempStore "rename-same" $ \cfg -> do
+          _ <- publishOk cfg sampleSlug sampleDto
+          let dto2 = sampleDto {pdName = "Любимые ТрекИ!"}
+          -- sanity: slug не изменился, rename быть не должно
+          slugFromName (pdName dto2) @?= sampleSlug
+          _ <- publishFromOk cfg (Just sampleSlug) sampleSlug True dto2
+          assertFiles
+            [(nspFile cfg sampleSlug, True), (mixPath cfg sampleSlug, True)]
+          assertNoLeftovers cfg
+          entries <- listOk cfg
+          e <- entryFor entries sampleSlug
+          peTitle e @?= "Любимые ТрекИ!"
+          rs <- readPublishedState cfg
+          [prSlug r | r <- rs] @?= [sampleSlug]
+    , testCase "целевой файл существует: конфликт, с overwrite - замена" $
+        withTempStore "rename-clash" $ \cfg -> do
+          let other = dtoNamed renameNewName
+          _ <- publishOk cfg sampleSlug sampleDto
+          _ <- publishOk cfg renameNewSlug other
+          -- без overwrite: конфликт до записи, файлы не тронуты
+          r <-
+            publishPlaylistFrom cfg (Just sampleSlug) renameNewSlug False (dtoNamed renameNewName)
+          r @?= Left (StoreConflict renameNewSlug)
+          assertFiles
+            [ (nspFile cfg sampleSlug, True)
+            , (mixPath cfg sampleSlug, True)
+            , (nspFile cfg renameNewSlug, True)
+            , (mixPath cfg renameNewSlug, True)
+            ]
+          rs0 <- readPublishedState cfg
+          length rs0 @?= 2
+          -- с overwrite: целевая пара заменяется, старая удаляется
+          _ <-
+            publishFromOk cfg (Just sampleSlug) renameNewSlug True (dtoNamed renameNewName)
+          assertFiles
+            [ (nspFile cfg sampleSlug, False)
+            , (mixPath cfg sampleSlug, False)
+            , (nspFile cfg renameNewSlug, True)
+            , (mixPath cfg renameNewSlug, True)
+            ]
+          assertNoLeftovers cfg
+          rs <- readPublishedState cfg
+          [prSlug x | x <- rs] @?= [renameNewSlug]
+    , testCase "старый файл исчез внешне: публикация проходит (OldGone)" $
+        withTempStore "rename-gone" $ \cfg -> do
+          _ <- publishOk cfg sampleSlug sampleDto
+          -- .nsp удалён извне; .mix ещё существует и подтверждён state
+          removeFile (nspFile cfg sampleSlug)
+          _ <-
+            publishFromOk cfg (Just sampleSlug) renameNewSlug False (dtoNamed renameNewName)
+          assertFiles
+            [ (nspFile cfg sampleSlug, False)
+            , (mixPath cfg sampleSlug, False)
+            , (nspFile cfg renameNewSlug, True)
+            , (mixPath cfg renameNewSlug, True)
+            ]
+          assertNoLeftovers cfg
+          rs <- readPublishedState cfg
+          [prSlug r | r <- rs] @?= [renameNewSlug]
+    , testCase "содержимое старого изменено извне: blocked, ничего не тронуто" $
+        withTempStore "rename-foreign" $ \cfg -> do
+          _ <- publishOk cfg sampleSlug sampleDto
+          BS.writeFile (nspFile cfg sampleSlug) externalNsp
+          expectBlocked (nspFile cfg sampleSlug) $
+            publishPlaylistFrom cfg (Just sampleSlug) renameNewSlug False (dtoNamed renameNewName)
+          assertFiles
+            [ (nspFile cfg sampleSlug, True)
+            , (mixPath cfg sampleSlug, True)
+            , (nspFile cfg renameNewSlug, False)
+            , (mixPath cfg renameNewSlug, False)
+            ]
+          -- старый файл остался в том виде, в каком его оставили извне
+          BS.readFile (nspFile cfg sampleSlug) >>= (@?= externalNsp)
+          rs <- readPublishedState cfg
+          [prSlug r | r <- rs] @?= [sampleSlug]
+          assertNoLeftovers cfg
+    , testCase "файлы записаны мимо приложения: blocked, файлы целы" $
+        withTempStore "rename-nostate" $ \cfg -> do
+          -- пара .mix + .nsp без записи в persisted state
+          let prev = "vneshniy"
+          BS.writeFile (mixPath cfg prev) (TE.encodeUtf8 validMix)
+          nspBs <- compileNsp (dtoNamed renameNewName)
+          BS.writeFile (nspFile cfg prev) nspBs
+          expectBlocked (nspFile cfg prev) $
+            publishPlaylistFrom cfg (Just prev) renameNewSlug False (dtoNamed renameNewName)
+          assertFiles
+            [ (mixPath cfg prev, True)
+            , (nspFile cfg prev, True)
+            , (nspFile cfg renameNewSlug, False)
+            , (mixPath cfg renameNewSlug, False)
+            ]
+          BS.readFile (nspFile cfg prev) >>= (@?= nspBs)
+          -- state не появился: публикация отменена до записи
+          doesFileExist (stateFilePath cfg) >>= (@?= False)
+          assertNoLeftovers cfg
+    , testCase "ошибка записи нового: старые файлы остаются рабочими" $
+        withTempStore "rename-writefail" $ \cfg -> do
+          _ <- publishOk cfg sampleSlug sampleDto
+          -- staging-каталог на месте временного файла нового .mix
+          let stage =
+                scRulesDir cfg </> ("." ++ T.unpack renameNewSlug ++ ".mix.tmp")
+          createDirectory stage
+          r <-
+            publishPlaylistFrom cfg (Just sampleSlug) renameNewSlug False (dtoNamed renameNewName)
+          case r of
+            Left StoreIo{} -> pure ()
+            other ->
+              assertFailure ("ожидался StoreIo, получено: " <> show other)
+          removeDirectory stage
+          assertFiles
+            [ (nspFile cfg sampleSlug, True)
+            , (mixPath cfg sampleSlug, True)
+            , (nspFile cfg renameNewSlug, False)
+            , (mixPath cfg renameNewSlug, False)
+            ]
+          rs <- readPublishedState cfg
+          [prSlug x | x <- rs] @?= [sampleSlug]
+          -- старая подборка по-прежнему читается
+          d <- readOk cfg sampleSlug
+          fmap pdName (pdDto d) @?= Just (pdName sampleDto)
+          assertNoLeftovers cfg
+    , testCase "сбой удаления старого: cleanup_failed, не скрыт как успех" $
+        withTempStore "rename-cleanupfail" $ \cfg -> do
+          _ <- publishOk cfg sampleSlug sampleDto
+          let boom :: FilePath -> IO ()
+              boom _ = throwIO (userError "сбой удаления (тест)")
+          r <-
+            publishPlaylistWith boom cfg (Just sampleSlug) renameNewSlug False (dtoNamed renameNewName)
+          case r of
+            Left (StoreCleanupFailed p _) -> p @?= nspFile cfg sampleSlug
+            other ->
+              assertFailure ("ожидался StoreCleanupFailed, получено: " <> show other)
+          -- новый файл записан, старый остался, state не обновлён
+          assertFiles
+            [ (nspFile cfg renameNewSlug, True)
+            , (mixPath cfg renameNewSlug, True)
+            , (nspFile cfg sampleSlug, True)
+            , (mixPath cfg sampleSlug, True)
+            ]
+          rs <- readPublishedState cfg
+          [prSlug x | x <- rs] @?= [sampleSlug]
+          assertNoLeftovers cfg
+    , testCase "чужие .nsp/.mix в каталогах не затронуты" $
+        withTempStore "rename-others" $ \cfg -> do
+          let other = sampleDto {pdName = "Другая Подборка"}
+              otherSlug = slugFromName (pdName other)
+          _ <- publishOk cfg sampleSlug sampleDto
+          _ <- publishOk cfg otherSlug other
+          otherNsp0 <- BS.readFile (nspFile cfg otherSlug)
+          otherMix0 <- BS.readFile (mixPath cfg otherSlug)
+          _ <-
+            publishFromOk cfg (Just sampleSlug) renameNewSlug False (dtoNamed renameNewName)
+          assertFiles
+            [(nspFile cfg otherSlug, True), (mixPath cfg otherSlug, True)]
+          BS.readFile (nspFile cfg otherSlug) >>= (@?= otherNsp0)
+          BS.readFile (mixPath cfg otherSlug) >>= (@?= otherMix0)
+          assertNoLeftovers cfg
+          rs <- readPublishedState cfg
+          sort [prSlug r | r <- rs] @?= sort [otherSlug, renameNewSlug]
+    , testCase "рестарт: state с диска указывает на новый путь, identity живёт" $
+        withTempStore "rename-restart" $ \cfg -> do
+          _ <- publishOk cfg sampleSlug sampleDto
+          _ <-
+            publishFromOk cfg (Just sampleSlug) renameNewSlug False (dtoNamed renameNewName)
+          -- «рестарт»: читается только persisted state с диска
+          rs <- readPublishedState cfg
+          case rs of
+            [r] -> do
+              prSlug r @?= renameNewSlug
+              fmap pfPath (prNsp r) @?= Just (nspFile cfg renameNewSlug)
+            other -> assertFailure ("неожиданный state: " <> show other)
+          -- следующий rename использует сохранённую identity
+          let s2 = slugFromName "Третий Вариант"
+          _ <- publishFromOk cfg (Just renameNewSlug) s2 False (dtoNamed "Третий Вариант")
+          assertFiles
+            [ (nspFile cfg sampleSlug, False)
+            , (mixPath cfg sampleSlug, False)
+            , (nspFile cfg renameNewSlug, False)
+            , (mixPath cfg renameNewSlug, False)
+            , (nspFile cfg s2, True)
+            , (mixPath cfg s2, True)
+            ]
+          assertNoLeftovers cfg
+          rs2 <- readPublishedState cfg
+          [prSlug r | r <- rs2] @?= [s2]
+    ]
+
+------------------------------------------------------------------------------
 -- Итоговый набор
 ------------------------------------------------------------------------------
 
@@ -433,4 +745,5 @@ storeTests =
     , statusTests
     , trashTests
     , symlinkTest
+    , renameTests
     ]

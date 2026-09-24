@@ -59,13 +59,14 @@ import qualified Nspeller.Muzlovar.Assets as Assets
 import Nspeller.Muzlovar.Html (editorPage, errorPage, indexPage, renderHtml, trashPage)
 import Nspeller.Muzlovar.Store
   ( PlaylistDetail (pdEntry, pdRaw)
-  , PlaylistEntry (peTitle)
-  , StoreConfig
+  , PlaylistEntry (peNspFile, peTitle)
+  , StoreConfig (..)
   , StoreError (..)
   , deletePlaylistFiles
   , listPlaylists
   , listTrash
   , publishPlaylist
+  , publishPlaylistFrom
   , purgeTrash
   , readPlaylist
   , restoreTrash
@@ -87,6 +88,7 @@ import Nspeller.Muzlovar.Types
   , pdName
   )
 import Nspeller.Schema (schemaJson)
+import System.FilePath ((</>))
 import Web.Scotty
   ( ActionM
   , ScottyM
@@ -203,6 +205,14 @@ storeErrorToApi = \case
   StoreInvalid _ errs -> (errs, status422)
   StoreIo m -> ([apiError "io_error" m], status500)
   StorePartial m -> ([apiError "partial_delete" m], status500)
+  StoreCleanupBlocked p why ->
+    ( [apiError "cleanup_blocked" (storeErrorMessage (StoreCleanupBlocked p why))]
+    , status422
+    )
+  StoreCleanupFailed p why ->
+    ( [apiError "cleanup_failed" (storeErrorMessage (StoreCleanupFailed p why))]
+    , status500
+    )
 
 -- | HTTP-статус ошибки хранилища.
 storeErrorStatus :: StoreError -> Status
@@ -250,6 +260,10 @@ routes cfg = do
           json $
             object
               [ "ok" .= True
+              , -- Итоговый filename из текущего названия: клиент
+                -- сравнивает его с опубликованным путём и показывает
+                -- блок «Опубликовано / Будет опубликовано».
+                "slug" .= slugFromName (pdName dto)
               , "mix" .= LT.fromStrict (cmpMix compiled)
               , "nsp" .= LTE.decodeUtf8 (cmpNsp compiled)
               , "errors" .= ([] :: [ApiError])
@@ -293,7 +307,14 @@ routes cfg = do
               Left errs -> respondErrors status422 errs
               Right dto -> do
                 overwrite <- overwriteRequested
-                r <- liftIO (publishPlaylist (scStoreCfg cfg) slug overwrite dto)
+                -- Итоговый slug — из названия в DTO: переименование
+                -- меняет filename. Прежний slug (адрес запроса) —
+                -- identity подборки для безопасного cleanup старых
+                -- файлов по persisted state.
+                let target = slugFromName (pdName dto)
+                r <-
+                  liftIO
+                    (publishPlaylistFrom (scStoreCfg cfg) (Just slug) target overwrite dto)
                 either respondStoreError json r
 
   delete "/api/playlists/:slug" $ do
@@ -329,8 +350,6 @@ routes cfg = do
     serveBytes "text/css; charset=utf-8" Assets.muzlovarCss
   get "/static/muzlovar.js" $
     serveBytes "application/javascript; charset=utf-8" Assets.muzlovarJs
-  get "/static/sortable.min.js" $
-    serveBytes "application/javascript; charset=utf-8" Assets.sortableJs
   get "/static/logo.png" $
     serveBytes "image/png" Assets.logoPng
   get "/static/favicon.ico" $
@@ -349,14 +368,20 @@ routes cfg = do
       Right xs -> htmlPage (indexPage xs)
 
   get "/new" $
-    htmlPage (editorPage Nothing)
+    htmlPage (editorPage Nothing Nothing (publishDir cfg))
 
   get "/edit/:slug" $ do
     slug <- pathParam "slug"
     r <- liftIO (readPlaylist (scStoreCfg cfg) slug)
     case r of
       Left e -> htmlPage (errorPage (storeErrorMessage e))
-      Right _ -> htmlPage (editorPage (Just slug))
+      Right d ->
+        htmlPage
+          ( editorPage
+              (Just slug)
+              ( actualPublishedPath cfg (peNspFile (pdEntry d)) )
+              (publishDir cfg)
+          )
 
   get "/trash" $ do
     r <- liftIO (listTrash (scStoreCfg cfg))
@@ -373,6 +398,18 @@ routes cfg = do
 ------------------------------------------------------------------------------
 -- Вспомогательное
 ------------------------------------------------------------------------------
+
+-- | Настроенный каталог публикации (.nsp): редактор показывает его в
+-- блоке «Путь публикации» (до публикации — только каталог, после —
+-- каталог с именем файла).
+publishDir :: ServerConfig -> FilePath
+publishDir = scPlaylistsDir . scStoreCfg
+
+-- | Фактический путь опубликованного @.nsp@ для блока «Путь
+-- публикации» (Nothing — подборка не опубликована): каталог
+-- публикации плюс имя реально существующего файла из entry.
+actualPublishedPath :: ServerConfig -> Maybe String -> Maybe FilePath
+actualPublishedPath cfg = fmap (publishDir cfg </>)
 
 -- | Отдать HTML-страницу.
 htmlPage :: Html () -> ActionM ()

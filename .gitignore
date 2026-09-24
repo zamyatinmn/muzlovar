@@ -1,5 +1,6 @@
 thundercloud
 dist-newstyle/
+muzlovar/e2e/node_modules/
 cabal.project.local
 .ghc.environment.*
 *.hi

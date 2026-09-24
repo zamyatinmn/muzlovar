@@ -228,6 +228,27 @@ compileTests =
             assertBool "нет строки" (isJust (aeLine e))
             assertBool "нет столбца" (isJust (aeColumn e))
             assertBool "нет пути до элемента" (maybe False (not . T.null) (aePath e))
+    , testCase "противоречивые условия: validation, позиция и путь" $
+        let dto =
+              (simpleDto "Тест")
+                { pdRoot =
+                    GroupDto
+                      "all"
+                      [ ItemCond (CondDto "год" "gt" (Just (Number 2020)))
+                      , ItemCond (CondDto "год" "lt" (Just (Number 2000)))
+                      ]
+                }
+         in case compilePlaylistDto dto of
+              Right _ -> assertFailure "ожидалась ошибка валидации"
+              Left [] -> assertFailure "список ошибок пуст"
+              Left (e : _) -> do
+                aeCode e @?= "validation"
+                assertBool
+                  ("нет сообщения о противоречии: " <> T.unpack (aeMessage e))
+                  ("противоречит условию" `T.isInfixOf` aeMessage e)
+                assertBool "нет строки" (isJust (aeLine e))
+                assertBool "нет столбца" (isJust (aeColumn e))
+                assertBool "нет пути до элемента" (maybe False (not . T.null) (aePath e))
     , testCase "структурная ошибка: код invalid_tree и путь /name" $
         case compilePlaylistDto (simpleDto "") of
           Right _ -> assertFailure "ожидалась структурная ошибка"

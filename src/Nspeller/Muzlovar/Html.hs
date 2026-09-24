@@ -65,7 +65,6 @@ layoutWith title mHeaderActions mainContent =
               <> main_ [class_ (if editorMode then "main-full" else "main")] mainContent
               <> footerEl
               <> div_ [id_ "toasts", makeAttribute "aria-live" "polite"] ""
-              <> script_ [src_ "/static/sortable.min.js"] ("" :: Text)
               <> script_ [src_ "/static/muzlovar.js"] ("" :: Text)
               <> dialogs
           )
@@ -330,6 +329,16 @@ badge cls label = span_ ([class_ ("badge " <> cls)] <> [makeAttribute "hidden" "
 
 -- | Каркас редактора. @Nothing@ — новая подборка.
 --
+-- Второй аргумент — фактический путь опубликованного @.nsp@
+-- ('Nothing', если подборка не опубликована), третий — настроенный
+-- каталог публикации (.nsp): каталог отдаётся клиенту как
+-- @data-publish-dir@, состояние — как @data-published@, путь файла —
+-- как @data-published-path@. Блок «Путь публикации» до первой
+-- публикации показывает каталог, после — полный путь файла; если
+-- текущее название даст другой filename, muzlovar.js дописывает
+-- блок «Будет опубликовано». Путь — только информация, без кнопок и
+-- редактирования.
+--
 -- Раскладка desktop: три колонки на всю высоту окна — ингредиенты
 -- (~22%), редактор подборки (~50%) и предпросмотр с публикацией
 -- (~28%). Дерево условий, палитра и правая колонка строятся
@@ -337,8 +346,8 @@ badge cls label = span_ ([class_ ("badge " <> cls)] <> [makeAttribute "hidden" "
 -- блоки. Правая колонка читается сверху вниз: карточка подборки и
 -- статус проверки — главные, технический код .mix/.nsp — свёрнутые
 -- блоки в самом низу.
-editorPage :: Maybe Text -> Html ()
-editorPage mslug =
+editorPage :: Maybe Text -> Maybe FilePath -> FilePath -> Html ()
+editorPage mslug publishedPath publishDir =
   layoutWith title (Just editorActions) workspace
   where
     title = case mslug of
@@ -361,8 +370,21 @@ editorPage mslug =
         [ id_ "editor"
         , class_ "workspace"
         , makeAttribute "data-slug" (fromMaybe "" mslug)
+        , makeAttribute "data-publish-dir" (T.pack publishDir)
+        , makeAttribute
+            "data-published"
+            (case publishedPath of Just _ -> "1"; Nothing -> "0")
+        , makeAttribute "data-published-path" (T.pack (fromMaybe "" publishedPath))
         ]
         (leftColumn <> centerColumn <> rightColumn)
+
+    -- Начальное содержимое блока «Путь публикации»: после публикации —
+    -- фактический путь файла на диске, до неё — только каталог
+    -- публикации из конфигурации сервера. Дальше блоком управляет
+    -- muzlovar.js (updatePath): при ожидающем переименовании добавляется
+    -- вторая половина «Будет опубликовано».
+    publishPathText :: Text
+    publishPathText = maybe (T.pack publishDir) T.pack publishedPath
 
     -------------------------------------------------------------- Ингредиенты
     leftColumn =
@@ -396,31 +418,12 @@ editorPage mslug =
                   ( textField "Название" "e-name" "Название подборки"
                       <> textField "Описание" "e-desc" "Зачем эта подборка"
                   )
+                  -- Параметры результата — компактной строкой сразу после
+                  -- полей и перед конструктором правил: внизу колонки
+                  -- «Порядок», «Лимит» и «Публичная» терялись.
+                  <> resultRow
                   <> p_ [id_ "e-personal", class_ "notice", makeAttribute "hidden" "hidden"] ""
                   <> div_ [id_ "e-tree", class_ "rules"] ""
-              )
-            <> div_
-              [class_ "col-foot"]
-              ( footField
-                  "Порядок"
-                  (div_ [id_ "e-sort", class_ "sort-box"] "")
-                  <> footField
-                    "Лимит"
-                    ( input_
-                        [ id_ "e-limit"
-                        , type_ "number"
-                        , min_ "1"
-                        , makeAttribute "placeholder" "без лимита"
-                        , makeAttribute "aria-label" "Лимит треков"
-                        ]
-                    )
-                  <> div_
-                    [class_ "foot-field foot-check"]
-                    ( input_ [id_ "e-public", type_ "checkbox"]
-                        <> label_
-                          [for_ "e-public", makeAttribute "title" "Видна всем пользователям"]
-                          "Публичная"
-                    )
               )
         )
 
@@ -467,16 +470,20 @@ editorPage mslug =
                             <> pre_ [id_ "e-preview-nsp", class_ "code"] ""
                         )
                     )
+                  -- Путь публикации — только информация: кнопки
+                  -- «Изменить» и редактирования нет. До первой
+                  -- публикации показывается каталог из конфигурации
+                  -- сервера, после — полный путь файла (см. updatePath
+                  -- в muzlovar.js).
                   <> section_
                     [class_ "block"]
-                    ( blockHead
-                        "Путь публикации"
-                        (button_ [id_ "e-path-edit", type_ "button", class_ "btn small"] "Изменить")
-                        <> code_ [id_ "e-path", class_ "path"] "—"
+                    ( blockHead "Путь публикации" mempty
+                        <> code_ [id_ "e-path", class_ "path"] (toHtml publishPathText)
                         <> p_
                           [class_ "block-note"]
-                          "Имя задаётся названием подборки; файл .nsp попадает \
-                          \в каталог PlaylistsPath Navidrome."
+                          "Только для информации: имя файла задаётся \
+                          \названием подборки, каталог — конфигурацией \
+                          \сервера (каталог .nsp Navidrome)."
                     )
                   -- Технический код на диске: свёрнут, пока не нужен.
                   <> collapsibleCode
@@ -511,12 +518,43 @@ editorPage mslug =
     footField lbl ctl =
       div_ [class_ "foot-field"] (span_ [class_ "foot-label"] (toHtml lbl) <> ctl)
 
+    -- «Порядок · Лимит · Публичная» одной строкой (на узком экране —
+    -- с переносом). Поля и их поведение не меняются — меняется только
+    -- место в разметке.
+    resultRow :: Html ()
+    resultRow =
+      div_
+        [class_ "result-row"]
+        ( footField
+            "Порядок"
+            (div_ [id_ "e-sort", class_ "sort-box"] "")
+            <> footField
+              "Лимит"
+              ( input_
+                  [ id_ "e-limit"
+                  , type_ "number"
+                  , min_ "1"
+                  , makeAttribute "placeholder" "без лимита"
+                  , makeAttribute "aria-label" "Лимит треков"
+                  ]
+              )
+            <> div_
+              [class_ "foot-field foot-check"]
+              ( input_ [id_ "e-public", type_ "checkbox"]
+                  <> label_
+                    [for_ "e-public", makeAttribute "title" "Видна всем пользователям"]
+                    "Публичная"
+              )
+        )
+
     blockHead :: Text -> Html () -> Html ()
     blockHead t action =
       div_ [class_ "block-head"] (span_ [class_ "block-title"] (toHtml t) <> action)
 
     -- Свёрнутый по умолчанию блок технического кода: пока не раскрыт,
-    -- пустая textarea не занимает место в колонке.
+    -- пустая textarea не занимает место в колонке. Содержимое — файлы
+    -- с диска (последняя опубликованная версия), а не live preview:
+    -- предпросмотр живёт во вкладках «Правила | .mix | .nsp».
     collapsibleCode :: Text -> Text -> Text -> Text -> Maybe Text -> Html ()
     collapsibleCode heading fid rows label mCopy =
       detailsEl
