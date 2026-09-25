@@ -6,6 +6,7 @@ import DtoTests (dtoTests)
 import GoldenTests (goldenTests)
 import Properties (propertyTests)
 import RoundTripTests (roundTripTests)
+import RegistryTests (registryTests)
 import SchemaTests (schemaTests)
 import ServerTests (serverTests)
 import StoreTests (storeTests)
@@ -22,6 +23,7 @@ main =
       , goldenTests
       , dtoTests
       , roundTripTests
+      , registryTests
       , schemaTests
       , storeTests
       , serverTests

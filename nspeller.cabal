@@ -32,6 +32,7 @@ library
       Nspeller.Ast
       Nspeller.Cli
       Nspeller.Compiler
+      Nspeller.Fields
       Nspeller.Navidrome
       Nspeller.Parser
       Nspeller.Render
@@ -60,6 +61,7 @@ library
     , megaparsec >=9.0
     , optparse-applicative >=0.16
     , scotty >=0.30
+    , scientific
     , text
     , time
     , wai
@@ -101,6 +103,7 @@ test-suite nspeller-test
       Generators
       GoldenTests
       Properties
+      RegistryTests
       RoundTripTests
       SchemaTests
       ServerTests
@@ -116,6 +119,7 @@ test-suite nspeller-test
     , http-types
     , nspeller
     , QuickCheck >=2.14
+    , scientific
     , tasty
     , tasty-golden
     , tasty-hunit

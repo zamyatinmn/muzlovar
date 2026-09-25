@@ -1,0 +1,29 @@
+{
+  "all": [
+    {
+      "inPlaylist": {
+        "id": "f0f0aaaa-bbbb-cccc-dddd-eeeeffff0000"
+      }
+    },
+    {
+      "notInPlaylist": {
+        "id": "11112222-3333-4444-5555-666677778888"
+      }
+    },
+    {
+      "any": [
+        {
+          "inPlaylist": {
+            "path": "other.nsp"
+          }
+        },
+        {
+          "notInPlaylist": {
+            "path": "../friends/favorites.nsp"
+          }
+        }
+      ]
+    }
+  ],
+  "name": "Ссылки на подборки"
+}

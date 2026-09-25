@@ -67,16 +67,14 @@ prop_prettyCanonical = forAll genPlaylist $ \p ->
             ("исходные байты: " <> show bytes <> "\nпосле roundtrip: " <> show (encodeNspValue v))
             (encodeNspValue v == bytes)
 
--- | Поля сортировки никогда не булевые: Navidrome не сортирует
--- по булевым полям, и валидация это отклоняет.
-prop_sortNeverBool :: Property
-prop_sortNeverBool = forAll genPlaylist $ \p ->
+-- | Каждое поле сортировки известно схеме: сортировка устроена по
+-- признаку 'sortFieldByName', и UI не содержит собственного списка.
+prop_sortFieldsKnown :: Property
+prop_sortFieldsKnown = forAll genPlaylist $ \p ->
   case vpSort p of
     Just (SortBy items) ->
       property $
-        all
-          (\(SortItem f _) -> sortFieldName f `notElem` boolFieldNames)
-          items
+        all (\(SortItem f _) -> sortFieldByName (sortFieldName f) == Just f) items
     _ -> property True
 
 propertyTests :: TestTree
@@ -87,5 +85,5 @@ propertyTests =
     , testProperty "оператор совместим с типом поля" prop_operatorCompatible
     , testProperty "limit в модели всегда положительный" prop_limitPositive
     , testProperty "pretty-print каноничен и детерминирован" prop_prettyCanonical
-    , testProperty "сортировка не содержит булевых полей" prop_sortNeverBool
+    , testProperty "поля сортировки известны схеме" prop_sortFieldsKnown
     ]

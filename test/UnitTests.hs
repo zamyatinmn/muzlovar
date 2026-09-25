@@ -9,10 +9,11 @@ import Data.Aeson (Value (..), object, toJSON, (.=))
 import Data.Aeson.Key (Key)
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.List.NonEmpty as NE
+import Data.Scientific (Scientific)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Nspeller.Ast
-import Nspeller.Compiler (compileText)
+import Nspeller.Compiler (compileText, compileTextWithWarnings)
 import Test.Tasty
 import Test.Tasty.HUnit
 
@@ -107,6 +108,28 @@ assertLacksKeys name src keys = testCase name $
           (all (\k -> KM.lookup k o == Nothing) keys)
       _ -> assertFailure "ожидался JSON-объект"
 
+-- | Компиляция должна завершиться успехом и породить предупреждения,
+-- содержащие данный фрагмент (ровно @expected@ штук). Предупреждения
+-- не влияют на валидность: @Left@ здесь — провал теста.
+assertWarns :: TestName -> Text -> Int -> Text -> TestTree
+assertWarns name src expected needle = testCase name $
+  case compileTextWithWarnings "test.mix" src of
+    Left errs -> assertFailure ("ошибка компиляции:\n" <> T.unpack (renderAll errs))
+    Right (_, warns) -> do
+      assertEqual ("получено:\n" <> T.unpack (renderAll warns)) expected (length warns)
+      let combined = T.intercalate "\n" (map renderCompileError warns)
+      assertBool
+        ( "нет предупреждения, содержащего \""
+            <> T.unpack needle
+            <> "\"; получено:\n"
+            <> T.unpack combined
+        )
+        (needle `T.isInfixOf` combined)
+
+-- | Компиляция успешна и не даёт ни одного предупреждения.
+assertNoWarns :: TestName -> Text -> TestTree
+assertNoWarns name src = assertWarns name src 0 ""
+
 ------------------------------------------------------------------------------
 -- Поля
 ------------------------------------------------------------------------------
@@ -153,8 +176,12 @@ fieldTests =
         (object ["name" .= t "Тест", "all" .= [object ["inTheLast" .= object ["dateadded" .= i 30]]]])
     , assertCompilesTo
         "explicit"
-        (wrap "explicit = \"explicit\"")
-        (object ["name" .= t "Тест", "all" .= [object ["is" .= object ["explicitstatus" .= t "explicit"]]]])
+        (wrap "explicit = \"e\"")
+        (object ["name" .= t "Тест", "all" .= [object ["is" .= object ["explicitstatus" .= t "e"]]]])
+    , assertCompilesTo
+        "explicit: Не определено (пустое значение набора)"
+        (wrap "explicit = \"\"")
+        (object ["name" .= t "Тест", "all" .= [object ["is" .= object ["explicitstatus" .= t ""]]]])
     , assertCompilesTo
         "обложка"
         (wrap "обложка = нет")
@@ -231,6 +258,36 @@ operatorTests =
         "не звучало N дней (notInTheLast)"
         (wrap "не звучало 90 дней")
         (object ["name" .= t "Тест", "all" .= [object ["notInTheLast" .= object ["lastplayed" .= i 90]]]])
+    , assertCompilesTo
+        "добавлено не за N дней (notInTheLast)"
+        (wrap "добавлено не за 30 дней")
+        (object ["name" .= t "Тест", "all" .= [object ["notInTheLast" .= object ["dateadded" .= i 30]]]])
+    , assertCompilesTo
+        "последнее_прослушивание не за N дней"
+        (wrap "последнее_прослушивание не за 60 дней")
+        (object ["name" .= t "Тест", "all" .= [object ["notInTheLast" .= object ["lastplayed" .= i 60]]]])
+    , assertCompilesTo
+        "replaygain: дробное значение"
+        (wrap "replaygain = -6.5")
+        (object ["name" .= t "Тест", "all" .= [object ["is" .= object ["rgtrackgain" .= (-6.5 :: Scientific)]]]])
+    , assertCompilesTo
+        "replaygain: дробные границы «между»"
+        (wrap "replaygain между -8 и -4.5")
+        ( object
+            [ "name" .= t "Тест"
+            , "all"
+                .= [ object
+                       ["inTheRange" .= object ["rgtrackgain" .= ([-8, -4.5] :: [Scientific])]]
+                   ]
+            ]
+        )
+    , assertCompilesTo
+        "replaygain: целое значение остаётся целым"
+        (wrap "replaygain = -6")
+        (object ["name" .= t "Тест", "all" .= [object ["is" .= object ["rgtrackgain" .= (-6 :: Scientific)]]]])
+    , assertValid
+        "explicit: текстовые операторы вне набора свободны"
+        (wrap "explicit содержит \"e\"")
     ]
 
 ------------------------------------------------------------------------------
@@ -486,8 +543,8 @@ errorTests =
         "дубликат указывает на второе вхождение"
         (T.unlines ["подборка \"Первая\"", "подборка \"Вторая\"", "где все {", "  любимое", "}"])
         (2, 1)
-    , assertErrorContains
-        "булево поле в сортировке"
+    , assertCompilesTo
+        "логические поля в сортировке"
         ( T.unlines
             [ "подборка \"Тест\""
             , "где все {"
@@ -495,10 +552,16 @@ errorTests =
             , "}"
             , "порядок {"
             , "  любимое возр"
+            , "  обложка убыв"
             , "}"
             ]
         )
-        "нельзя использовать для сортировки"
+        ( object
+            [ "name" .= t "Тест"
+            , "all" .= [object ["is" .= object ["loved" .= True]]]
+            , "sort" .= t "loved,-hascoverart"
+            ]
+        )
     , assertErrorContains
         "неизвестное поле сортировки"
         ( T.unlines
@@ -520,10 +583,6 @@ errorTests =
         "проверка наличия не для всех полей"
         (wrap "любимое присутствует")
         "не поддерживает проверку наличия"
-    , assertErrorContains
-        "сравнение даты не поддерживается"
-        (wrap "добавлено = \"2020-01-01\"")
-        "Для датовых полей поддерживается только сравнение"
     , assertErrorContains
         "неположительное число дней"
         (wrap "добавлено за 0 дней")
@@ -660,13 +719,19 @@ semanticTests =
         "все: диапазон не пересекается с >"
         (wrapGroup "все" ["год между 1980 и 1989", "год > 2020"])
         "противоречит условию"
+    , assertValid
+        "все: два равенства жанра (multivalue)"
+        (wrapGroup "все" ["жанр = \"rock\"", "жанр = \"jazz\""])
+    , assertValid
+        "все: = и != жанра (multivalue)"
+        (wrapGroup "все" ["жанр = \"rock\"", "жанр != \"rock\""])
     , assertErrorContains
         "все: два разных равенства текста"
-        (wrapGroup "все" ["жанр = \"rock\"", "жанр = \"jazz\""])
+        (wrapGroup "все" ["название = \"rock\"", "название = \"jazz\""])
         "противоречит условию"
     , assertErrorContains
         "все: = и != одного значения (текст)"
-        (wrapGroup "все" ["жанр = \"rock\"", "жанр != \"rock\""])
+        (wrapGroup "все" ["название = \"rock\"", "название != \"rock\""])
         "противоречит условию"
     , assertErrorContains
         "все: = и != одного значения (число)"
@@ -727,6 +792,653 @@ semanticTests =
     ]
 
 ------------------------------------------------------------------------------
+-- Числовые границы: >=, <=, между, домен и предупреждения
+------------------------------------------------------------------------------
+
+-- | Пары «>=»/«<=» одного поля в «все» lowerингуются в один
+-- нативный @inTheRange@ независимо от порядка следования.
+boundaryTests :: TestTree
+boundaryTests =
+  testGroup
+    "Числовые границы"
+    [ assertCompilesTo
+        ">= -> gt or is"
+        (wrap "оценка >= 4")
+        ( object
+            [ "name" .= t "Тест"
+            ,
+              "all"
+                .= [ object
+                       [ "any"
+                           .= [ object ["gt" .= object ["rating" .= i 4]]
+                              , object ["is" .= object ["rating" .= i 4]]
+                              ]
+                       ]
+                   ]
+            ]
+        )
+    , assertCompilesTo
+        ">= для года (без границ домена)"
+        (wrap "год >= 2020")
+        ( object
+            [ "name" .= t "Тест"
+            ,
+              "all"
+                .= [ object
+                       [ "any"
+                           .= [ object ["gt" .= object ["year" .= i 2020]]
+                              , object ["is" .= object ["year" .= i 2020]]
+                              ]
+                       ]
+                   ]
+            ]
+        )
+    , assertCompilesTo
+        "<= -> lt or is"
+        (wrap "оценка <= 4")
+        ( object
+            [ "name" .= t "Тест"
+            ,
+              "all"
+                .= [ object
+                       [ "any"
+                           .= [ object ["lt" .= object ["rating" .= i 4]]
+                              , object ["is" .= object ["rating" .= i 4]]
+                              ]
+                       ]
+                   ]
+            ]
+        )
+    , assertCompilesTo
+        "<= для прослушиваний"
+        (wrap "прослушиваний <= 100")
+        ( object
+            [ "name" .= t "Тест"
+            ,
+              "all"
+                .= [ object
+                       [ "any"
+                           .= [ object ["lt" .= object ["playcount" .= i 100]]
+                              , object ["is" .= object ["playcount" .= i 100]]
+                              ]
+                       ]
+                   ]
+            ]
+        )
+    , assertCompilesTo
+        "между для оценки"
+        (wrap "оценка между 2 и 5")
+        (object ["name" .= t "Тест", "all" .= [object ["inTheRange" .= object ["rating" .= [i 2, i 5]]]]])
+    , assertCompilesTo
+        "между для года"
+        (wrap "год между 2000 и 2020")
+        (object ["name" .= t "Тест", "all" .= [object ["inTheRange" .= object ["year" .= [i 2000, i 2020]]]]])
+    , assertCompilesTo
+        "пара >= и <= в все сливается в inTheRange"
+        (wrapGroup "все" ["оценка >= 2", "оценка <= 5"])
+        (object ["name" .= t "Тест", "all" .= [object ["inTheRange" .= object ["rating" .= [i 2, i 5]]]]])
+    , assertCompilesTo
+        "пара <= и >= в все сливается (обратный порядок)"
+        (wrapGroup "все" ["оценка <= 5", "оценка >= 2"])
+        (object ["name" .= t "Тест", "all" .= [object ["inTheRange" .= object ["rating" .= [i 2, i 5]]]]])
+    , assertCompilesTo
+        "в любое пара не сливается (разные ветви)"
+        ( wrapGroup
+            "любое"
+            ["оценка >= 2", "оценка <= 5"]
+        )
+        ( object
+            [ "name" .= t "Тест"
+            ,
+              "any"
+                .= [ object ["any" .= [object ["gt" .= object ["rating" .= i 2]], object ["is" .= object ["rating" .= i 2]]]]
+                   , object ["any" .= [object ["lt" .= object ["rating" .= i 5]], object ["is" .= object ["rating" .= i 5]]]]
+                   ]
+            ]
+        )
+    , testGroup
+        "доменные ошибки"
+        [ assertErrorContains
+            "значение выше максимума"
+            (wrap "оценка = 7")
+            "вне допустимого диапазона"
+        , assertErrorContains
+            "значение ниже минимума"
+            (wrap "прослушиваний >= -1")
+            "вне допустимого диапазона"
+        , assertErrorContains
+            "строгое сравнение упирается в максимум"
+            (wrap "оценка > 5")
+            "Условие не может выполняться"
+        , assertErrorContains
+            "строгое сравнение упирается в минимум"
+            (wrap "прослушиваний < 0")
+            "Условие не может выполняться"
+        , assertErrorContains
+            "диапазон выходит за верхнюю границу"
+            (wrap "оценка между 0 и 6")
+            "выходит за допустимые границы"
+        , assertErrorContains
+            "диапазон не пересекает домен"
+            (wrap "оценка между 7 и 9")
+            "не пересекает допустимый диапазон"
+        , assertErrorContains
+            "контрадикция >= и <="
+            (wrapGroup "все" ["год >= 2020", "год <= 2000"])
+            "не могут выполняться одновременно"
+        ]
+    , testGroup
+        "типовые ошибки"
+        [ assertErrorContains
+            ">= на булевом поле"
+            (wrap "любимое >= 3")
+            "Оператор «>=» применим только к числовым полям."
+        , assertErrorContains
+            "<= на текстовом поле"
+            (wrap "жанр <= 3")
+            "Поле «жанр» имеет текстовый тип."
+        , assertErrorContains
+            "enum: значение вне набора"
+            (wrap "explicit = \"explicit\"")
+            "не входит в допустимые значения"
+        , assertErrorContains
+            "enum: перечень допустимых значений"
+            (wrap "explicit != \"xyz\"")
+            "«e» (Explicit), «c» (Clean), «» (Не определено)"
+        , assertErrorContains
+            "дробное значение целочисленного поля"
+            (wrap "год = 1980.5")
+            "Значение 1980.5 должно быть целым числом."
+        , assertErrorContains
+            "дробное значение: поле не поддерживает дробные"
+            (wrap "год = 1980.5")
+            "не поддерживает дробные значения"
+        , assertErrorContains
+            "дробная граница «между»"
+            (wrap "год между 1980.5 и 1990")
+            "должно быть целым числом"
+        , assertErrorContains
+            "не за N дней на текстовом поле"
+            (wrap "жанр не за 5 дней")
+            "Сравнение «не за … дней» применимо только к датовым полям"
+        , assertErrorContains
+            "не за N дней: поле имеет текстовый тип"
+            (wrap "жанр не за 5 дней")
+            "Поле «жанр» имеет текстовый тип."
+        ]
+    ]
+
+------------------------------------------------------------------------------
+-- Датовые условия: абсолютные даты ГГГГ-ММ-ДД
+------------------------------------------------------------------------------
+
+dateTests :: TestTree
+dateTests =
+  testGroup
+    "Даты"
+    [ assertCompilesTo
+        "= дата"
+        (wrap "последнее_прослушивание = 2020-01-01")
+        (object ["name" .= t "Тест", "all" .= [object ["is" .= object ["lastplayed" .= t "2020-01-01"]]]])
+    , assertCompilesTo
+        "= дата в кавычках"
+        (wrap "последнее_прослушивание = \"2020-01-01\"")
+        (object ["name" .= t "Тест", "all" .= [object ["is" .= object ["lastplayed" .= t "2020-01-01"]]]])
+    , assertCompilesTo
+        "!= дата"
+        (wrap "добавлено != 2020-01-01")
+        (object ["name" .= t "Тест", "all" .= [object ["isNot" .= object ["dateadded" .= t "2020-01-01"]]]])
+    , assertCompilesTo
+        "> дата"
+        (wrap "добавлено > 2020-01-01")
+        (object ["name" .= t "Тест", "all" .= [object ["gt" .= object ["dateadded" .= t "2020-01-01"]]]])
+    , assertCompilesTo
+        "< дата"
+        (wrap "последнее_прослушивание < 2020-01-01")
+        (object ["name" .= t "Тест", "all" .= [object ["lt" .= object ["lastplayed" .= t "2020-01-01"]]]])
+    , assertCompilesTo
+        ">= дата -> gt или is"
+        (wrap "добавлено >= 2020-01-01")
+        ( object
+            [ "name" .= t "Тест"
+            ,
+              "all"
+                .= [ object
+                       [ "any"
+                           .= [ object ["gt" .= object ["dateadded" .= t "2020-01-01"]]
+                              , object ["is" .= object ["dateadded" .= t "2020-01-01"]]
+                              ]
+                       ]
+                   ]
+            ]
+        )
+    , assertCompilesTo
+        "<= дата -> lt или is"
+        (wrap "последнее_прослушивание <= 2020-01-01")
+        ( object
+            [ "name" .= t "Тест"
+            ,
+              "all"
+                .= [ object
+                       [ "any"
+                           .= [ object ["lt" .= object ["lastplayed" .= t "2020-01-01"]]
+                              , object ["is" .= object ["lastplayed" .= t "2020-01-01"]]
+                              ]
+                       ]
+                   ]
+            ]
+        )
+    , assertCompilesTo
+        "между датами -> inTheRange"
+        (wrap "добавлено между 2024-01-01 и 2024-12-31")
+        ( object
+            [ "name" .= t "Тест"
+            , "all" .= [object ["inTheRange" .= object ["dateadded" .= [t "2024-01-01", t "2024-12-31"]]]]
+            ]
+        )
+    , assertCompilesTo
+        "до -> before"
+        (wrap "последнее_прослушивание до 2024-06-01")
+        (object ["name" .= t "Тест", "all" .= [object ["before" .= object ["lastplayed" .= t "2024-06-01"]]]])
+    , assertCompilesTo
+        "после -> after"
+        (wrap "последнее_прослушивание после 2024-06-01")
+        (object ["name" .= t "Тест", "all" .= [object ["after" .= object ["lastplayed" .= t "2024-06-01"]]]])
+    , assertCompilesTo
+        "пара >= и <= дат в все сливается в inTheRange"
+        (wrapGroup "все" ["добавлено >= 2024-01-01", "добавлено <= 2024-12-31"])
+        ( object
+            [ "name" .= t "Тест"
+            , "all" .= [object ["inTheRange" .= object ["dateadded" .= [t "2024-01-01", t "2024-12-31"]]]]
+            ]
+        )
+    , assertCompilesTo
+        "в любое пара дат не сливается (разные ветви)"
+        (wrapGroup "любое" ["добавлено >= 2024-01-01", "добавлено <= 2024-12-31"])
+        ( object
+            [ "name" .= t "Тест"
+            ,
+              "any"
+                .= [ object ["any" .= [object ["gt" .= object ["dateadded" .= t "2024-01-01"]], object ["is" .= object ["dateadded" .= t "2024-01-01"]]]]
+                   , object ["any" .= [object ["lt" .= object ["dateadded" .= t "2024-12-31"]], object ["is" .= object ["dateadded" .= t "2024-12-31"]]]]
+                   ]
+            ]
+        )
+    , assertValid
+        "дата в кавычках после «до»"
+        (wrap "последнее_прослушивание до \"2024-06-01\"")
+    , assertValid
+        "кавыченные даты в «между»"
+        (wrap "добавлено между \"2024-01-01\" и \"2024-12-31\"")
+    , testGroup
+        "ошибки"
+        [ assertErrorContains
+            "до на числовом поле"
+            (wrap "год до 2020-01-01")
+            "Оператор «до» применим только к датовым полям."
+        , assertErrorContains
+            "до на числовом поле: тип поля"
+            (wrap "год до 2020-01-01")
+            "Поле «год» имеет числовой тип."
+        , assertErrorContains
+            "после на текстовом поле"
+            (wrap "название после 2020-01-01")
+            "Оператор «после» применим только к датовым полям."
+        , assertErrorContains
+            "до на логическом поле"
+            (wrap "любимое до 2020-01-01")
+            "Поле «любимое» имеет логический тип."
+        , assertErrorContains
+            "год между датами"
+            (wrap "год между 2020-01-01 и 2020-12-31")
+            "Оператор «между» применим только к датовым полям."
+        , assertErrorContains
+            "перевёрнутый датовый диапазон"
+            (wrap "добавлено между 2020-01-01 и 2019-01-01")
+            "Нижняя граница диапазона не может быть больше верхней: 2020-01-01 > 2019-01-01."
+        , assertErrorContains
+            "число вместо даты"
+            (wrap "добавлено = 20200101")
+            "ожидается дата в формате ГГГГ-ММ-ДД"
+        , assertErrorContains
+            "несуществующая дата"
+            (wrap "добавлено = 2024-02-30")
+            "несуществующая дата"
+        , assertErrorContains
+            "текстовый оператор на датовом поле"
+            (wrap "последнее_прослушивание начинается с \"2020\"")
+            "Оператор «начинается с» применим только к текстовым полям."
+        , assertErrorContains
+            "текстовый оператор на датовом поле: тип"
+            (wrap "последнее_прослушивание начинается с \"2020\"")
+            "Поле «последнее_прослушивание» имеет тип даты."
+        ]
+    , testGroup
+        "семантика"
+        [ assertErrorContains
+            "до и после: противоречие"
+            (wrapGroup "все" ["последнее_прослушивание до 2020-01-01", "последнее_прослушивание после 2021-01-01"])
+            "противоречит условию"
+        , assertErrorContains
+            "= и != одной даты"
+            (wrapGroup "все" ["добавлено = 2020-01-01", "добавлено != 2020-01-01"])
+            "противоречит условию"
+        , assertErrorContains
+            "кавыченная дата участвует в противоречии"
+            ( wrapGroup
+                "все"
+                ["последнее_прослушивание = \"2020-01-01\"", "последнее_прослушивание != 2020-01-01"]
+            )
+            "противоречит условию"
+        , assertErrorContains
+            "диапазон дат и «после» не пересекаются"
+            ( wrapGroup
+                "все"
+                ["добавлено между 2019-01-01 и 2019-12-31", "добавлено после 2020-06-01"]
+            )
+            "противоречит условию"
+        , assertValid
+            "встречные даты в разных ветвях любого"
+            (wrapGroup "любое" ["добавлено до 2020-01-01", "добавлено после 2021-01-01"])
+        , assertValid
+            "абсолютная дата и «за N дней» не противоречат"
+            ( wrapGroup
+                "все"
+                ["последнее_прослушивание до 2020-01-01", "последнее_прослушивание за 30 дней"]
+            )
+        ]
+    , testGroup
+        "предупреждения"
+        [ assertWarns
+            "избыточная нижняя граница даты"
+            (wrapGroup "все" ["последнее_прослушивание > 2020-01-01", "последнее_прослушивание > 2019-01-01"])
+            1
+            "избыточно"
+        , assertNoWarns
+            "абсолютная и относительная оси не дают ложных предупреждений"
+            (wrapGroup "все" ["последнее_прослушивание > 2020-01-01", "последнее_прослушивание за 30 дней"])
+        , assertNoWarns
+            "диапазон дат не покрывает домен"
+            (wrap "добавлено между 2024-01-01 и 2024-12-31")
+        , assertNoWarns
+            "границы дат в все не избыточны"
+            (wrapGroup "все" ["добавлено >= 2024-01-01", "добавлено <= 2024-12-31"])
+        ]
+    ]
+
+warningTests :: TestTree
+warningTests =
+  testGroup
+    "Предупреждения"
+    [ assertWarns
+        "точный дубликат в все"
+        (wrapGroup "все" ["год > 2020", "год > 2020"])
+        1
+        "дублирует"
+    , assertWarns
+        "более слабое условие избыточно"
+        (wrapGroup "все" ["год > 2000", "год > 2020"])
+        1
+        "избыточно"
+    , assertWarns
+        "покрытие домена (>=)"
+        (wrap "оценка >= 0")
+        1
+        "покрывает весь допустимый диапазон"
+    , assertWarns
+        "покрытие домена (между)"
+        (wrap "оценка между 0 и 5")
+        1
+        "покрывает весь допустимый диапазон"
+    , assertNoWarns
+        "условия в разных ветвях любого не дубликаты"
+        (wrapGroup "любое" ["год > 2020", "год > 2020"])
+    , assertNoWarns
+        "встречные границы в разных ветвях любого"
+        (wrapGroup "любое" ["год > 2020", "год < 2000"])
+    ]
+
+------------------------------------------------------------------------------
+-- Членство в подборке (inPlaylist / notInPlaylist)
+------------------------------------------------------------------------------
+
+playlistTests :: TestTree
+playlistTests =
+  testGroup
+    "Членство в подборке"
+    [ assertCompilesTo
+        "в подборке id"
+        (wrap "в подборке id \"abc-123\"")
+        ( object
+            [ "name" .= t "Тест"
+            , "all" .= [object ["inPlaylist" .= object ["id" .= t "abc-123"]]]
+            ]
+        )
+    , assertCompilesTo
+        "не в подборке id"
+        (wrap "не в подборке id \"abc-123\"")
+        ( object
+            [ "name" .= t "Тест"
+            , "all" .= [object ["notInPlaylist" .= object ["id" .= t "abc-123"]]]
+            ]
+        )
+    , assertCompilesTo
+        "в подборке файл"
+        (wrap "в подборке файл \"other.nsp\"")
+        ( object
+            [ "name" .= t "Тест"
+            , "all" .= [object ["inPlaylist" .= object ["path" .= t "other.nsp"]]]
+            ]
+        )
+    , assertCompilesTo
+        "не в подборке файл"
+        (wrap "не в подборке файл \"../other.nsp\"")
+        ( object
+            [ "name" .= t "Тест"
+            , "all" .= [object ["notInPlaylist" .= object ["path" .= t "../other.nsp"]]]
+            ]
+        )
+    , assertErrorContains
+        "пустой идентификатор подборки"
+        (wrap "в подборке id \"\"")
+        "Идентификатор подборки не может быть пустым"
+    , assertErrorContains
+        "пустой путь к файлу подборки"
+        (wrap "в подборке файл \"   \"")
+        "Путь к файлу подборки не может быть пустым"
+    , assertErrorContains
+        "в подборке и не в подборке одной ссылки - противоречие"
+        (wrapGroup "все" ["в подборке id \"x\"", "не в подборке id \"x\""])
+        "противоречит условию"
+    , assertValid
+        "разные ссылки не противоречат друг другу"
+        (wrapGroup "все" ["в подборке id \"x\"", "не в подборке id \"y\""])
+    , assertValid
+        "разные виды ссылки не противоречат друг другу"
+        (wrapGroup "все" ["в подборке id \"x\"", "не в подборке файл \"x\""])
+    , assertValid
+        "булево условие непосредственно перед «не в подборке»"
+        (wrapGroup "все" ["обложка", "не в подборке id \"x\""])
+    , assertWarns
+        "точная дубликация членства предупреждает один раз"
+        (wrapGroup "все" ["в подборке id \"x\"", "в подборке id \"x\""])
+        1
+        "дублирует"
+    , assertNoWarns
+        "разные ссылки на подборки не дают предупреждений"
+        (wrapGroup "все" ["в подборке id \"x\"", "в подборке id \"y\""])
+    ]
+
+------------------------------------------------------------------------------
+-- Поля реестра (e2e: DSL → NSP)
+------------------------------------------------------------------------------
+
+-- | Полный e2e-набор для полей, добавленных расширением реестра:
+-- каждый вид значения, проверка наличия, альбомные/артистные поля,
+-- MusicBrainz ID, алиасы и отрицательные примеры.
+registryFieldTests :: TestTree
+registryFieldTests =
+  testGroup
+    "Поля реестра (e2e)"
+    [ -- целочисленное поле
+      assertCompilesTo
+        "номер_трека (целое)"
+        (wrap "номер_трека = 3")
+        (object ["name" .= t "Тест", "all" .= [object ["is" .= object ["tracknumber" .= i 3]]]])
+    , assertCompilesTo
+        "номер_диска (целое, сравнение)"
+        (wrap "номер_диска > 1")
+        (object ["name" .= t "Тест", "all" .= [object ["gt" .= object ["discnumber" .= i 1]]]])
+    , -- дробное поле
+      assertCompilesTo
+        "длительность (дробная)"
+        (wrap "длительность > 200.5")
+        ( object
+            ["name" .= t "Тест", "all" .= [object ["gt" .= object ["duration" .= (200.5 :: Scientific)]]]]
+        )
+    , assertCompilesTo
+        "replaygain_альбом (дробное, отрицательное)"
+        (wrap "replaygain_альбом < -6.5")
+        ( object
+            ["name" .= t "Тест", "all" .= [object ["lt" .= object ["rgalbumgain" .= (-6.5 :: Scientific)]]]]
+        )
+    , -- текстовое поле
+      assertCompilesTo
+        "кодек (текст)"
+        (wrap "кодек = \"MP3\"")
+        (object ["name" .= t "Тест", "all" .= [object ["is" .= object ["codec" .= t "MP3"]]]])
+    , assertCompilesTo
+        "номер_в_каталоге (текст, содержит)"
+        (wrap "номер_в_каталоге содержит \"ABC\"")
+        ( object
+            ["name" .= t "Тест", "all" .= [object ["contains" .= object ["catalognumber" .= t "ABC"]]]]
+        )
+    , -- проверка наличия
+      assertCompilesTo
+        "темп присутствует"
+        (wrap "темп присутствует")
+        (object ["name" .= t "Тест", "all" .= [object ["isPresent" .= object ["bpm" .= True]]]])
+    , assertCompilesTo
+        "битовая_глубина отсутствует"
+        (wrap "битовая_глубина отсутствует")
+        (object ["name" .= t "Тест", "all" .= [object ["isMissing" .= object ["bitdepth" .= True]]]])
+    , assertCompilesTo
+        "mbid_артиста отсутствует"
+        (wrap "mbid_артиста отсутствует")
+        ( object
+            ["name" .= t "Тест", "all" .= [object ["isMissing" .= object ["mbz_artist_id" .= True]]]]
+        )
+    , -- логическое поле
+      assertCompilesTo
+        "сборник = да"
+        (wrap "сборник = да")
+        (object ["name" .= t "Тест", "all" .= [object ["is" .= object ["compilation" .= True]]]])
+    , assertCompilesTo
+        "файл_отсутствует (сахар)"
+        (wrap "файл_отсутствует")
+        (object ["name" .= t "Тест", "all" .= [object ["is" .= object ["missing" .= True]]]])
+    , -- дата
+      assertCompilesTo
+        "дата_релиза после"
+        (wrap "дата_релиза после 2020-01-01")
+        ( object
+            ["name" .= t "Тест", "all" .= [object ["after" .= object ["releasedate" .= t "2020-01-01"]]]]
+        )
+    , assertCompilesTo
+        "дата_добавления_альбома за 30 дней"
+        (wrap "дата_добавления_альбома за 30 дней")
+        ( object
+            ["name" .= t "Тест", "all" .= [object ["inTheLast" .= object ["albumdateadded" .= i 30]]]]
+        )
+    , assertCompilesTo
+        "дата_любимого до"
+        (wrap "дата_любимого до 2024-01-01")
+        ( object
+            ["name" .= t "Тест", "all" .= [object ["before" .= object ["dateloved" .= t "2024-01-01"]]]]
+        )
+    , -- альбомные и артистные поля
+      assertCompilesTo
+        "прослушиваний_альбома"
+        (wrap "прослушиваний_альбома > 10")
+        ( object
+            ["name" .= t "Тест", "all" .= [object ["gt" .= object ["albumplaycount" .= i 10]]]]
+        )
+    , assertCompilesTo
+        "длительность_альбома (дробная)"
+        (wrap "длительность_альбома > 3600")
+        ( object
+            ["name" .= t "Тест", "all" .= [object ["gt" .= object ["albumduration" .= i 3600]]]]
+        )
+    , assertCompilesTo
+        "любимый_артист = нет"
+        (wrap "любимый_артист = нет")
+        (object ["name" .= t "Тест", "all" .= [object ["is" .= object ["artistloved" .= False]]]])
+    , assertCompilesTo
+        "оценка_артиста = 5"
+        (wrap "оценка_артиста = 5")
+        (object ["name" .= t "Тест", "all" .= [object ["is" .= object ["artistrating" .= i 5]]]])
+    , -- идентификаторы
+      assertCompilesTo
+        "mbid_альбома"
+        (wrap "mbid_альбома = \"abc-123\"")
+        (object ["name" .= t "Тест", "all" .= [object ["is" .= object ["mbz_album_id" .= t "abc-123"]]]])
+    , assertCompilesTo
+        "библиотека (library_id)"
+        (wrap "библиотека = 2")
+        (object ["name" .= t "Тест", "all" .= [object ["is" .= object ["library_id" .= i 2]]]])
+    , -- алиасы Navidrome разрешаются в канонические имена
+      assertCompilesTo
+        "алиас replaygain_track_gain => rgtrackgain"
+        (wrap "replaygain_track_gain > -6.5")
+        ( object
+            ["name" .= t "Тест", "all" .= [object ["gt" .= object ["rgtrackgain" .= (-6.5 :: Scientific)]]]]
+        )
+    , assertCompilesTo
+        "NSP-имя поля разрешается в DSL"
+        (wrap "tracknumber = 3")
+        (object ["name" .= t "Тест", "all" .= [object ["is" .= object ["tracknumber" .= i 3]]]])
+    , assertCompilesTo
+        "алиас lastPlayed в сортировке => lastplayed"
+        ( T.unlines
+            [ "подборка \"Тест\""
+            , "где все {"
+            , "  любимое"
+            , "}"
+            , "порядок {"
+            , "  lastPlayed убыв"
+            , "}"
+            ]
+        )
+        ( object
+            [ "name" .= t "Тест"
+            , "all" .= [object ["is" .= object ["loved" .= True]]]
+            , "sort" .= t "-lastplayed"
+            ]
+        )
+    , -- отрицательные примеры
+      assertErrorContains
+        "дробь на целочисленном поле"
+        (wrap "номер_трека = 2.5")
+        "Значение 2.5 должно быть целым числом."
+    , assertErrorContains
+        "проверка наличия на поле без признака"
+        (wrap "библиотека присутствует")
+        "не поддерживает проверку наличия"
+    , assertErrorContains
+        "текстовый оператор на числовом поле"
+        (wrap "размер содержит \"икра\"")
+        "применим только к текстовым полям"
+    , assertErrorContains
+        "значение вне границ рейтинга альбома"
+        (wrap "оценка_альбома = 7")
+        "вне допустимого диапазона"
+    , assertErrorContains
+        "условие вне неотрицательной области"
+        (wrap "прослушиваний_альбома < 0")
+        "не допускает ни одного допустимого значения"
+    ]
+
+------------------------------------------------------------------------------
 -- Итоговый набор
 ------------------------------------------------------------------------------
 
@@ -735,9 +1447,14 @@ unitTests =
   testGroup
     "Unit"
     [ fieldTests
+    , registryFieldTests
     , operatorTests
     , groupTests
     , metadataTests
     , semanticTests
+    , boundaryTests
+    , dateTests
+    , warningTests
     , errorTests
+    , playlistTests
     ]

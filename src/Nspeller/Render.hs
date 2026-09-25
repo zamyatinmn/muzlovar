@@ -80,13 +80,25 @@ renderCond = \case
   RBare name -> name
   RBin name op val -> T.unwords [name, renderRawOp op, renderRawValue val]
   RBetween name lo hi ->
-    T.unwords [name, "между", tshow lo, "и", tshow hi]
+    T.unwords [name, "между", formatNumber lo, "и", formatNumber hi]
   RPresence name op ->
     T.unwords [name, presenceOpDesc op]
   RRelative name days ->
     T.unwords [name, "за", tshow days, "дней"]
+  RNotRelative name days ->
+    T.unwords [name, "не", "за", tshow days, "дней"]
   RNotPlayed days ->
     T.unwords ["не", "звучало", tshow days, "дней"]
+  RDateBetween name lo hi ->
+    T.unwords [name, "между", formatDay lo, "и", formatDay hi]
+  RPlaylist membership ref ->
+    T.unwords
+      ( (case membership of
+           InPlaylist -> ["в", "подборке"]
+           NotInPlaylist -> ["не", "в", "подборке"]
+        )
+          <> [playlistRefKindDsl (prKind ref), renderString (prValue ref)]
+      )
 
 -- | Написание бинарного оператора в DSL.
 renderRawOp :: RawOp -> Text
@@ -94,19 +106,25 @@ renderRawOp = \case
   OpEq -> "="
   OpNe -> "!="
   OpGt -> ">"
+  OpGe -> ">="
   OpLt -> "<"
+  OpLe -> "<="
   OpContains -> "содержит"
   OpNotContains -> "не содержит"
   OpStartsWith -> "начинается с"
   OpEndsWith -> "заканчивается на"
+  OpBefore -> "до"
+  OpAfter -> "после"
 
--- | Значение-операнд: строка всегда в кавычках, число и булево — как есть.
+-- | Значение-операнд: строка всегда в кавычках, число, дата и булево
+-- — как есть.
 renderRawValue :: RawValue -> Text
 renderRawValue = \case
   RVText t -> renderString t
-  RVNumber n -> tshow n
+  RVNumber n -> formatNumber n
   RVBool True -> "да"
   RVBool False -> "нет"
+  RVDate d -> formatDay d
 
 -- | Строковый литерал с экранированием символов, которые парсер
 -- принимает только в экранированной форме.

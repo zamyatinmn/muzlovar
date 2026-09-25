@@ -41,4 +41,6 @@ goldenTests =
     [ goldenMix "forgotten-favorites"
     , goldenMix "eighties-rock"
     , goldenMix "missing-metadata"
+    , goldenMix "recent-discoveries"
+    , goldenMix "playlist-links"
     ]

@@ -781,6 +781,8 @@ pre.code:empty { display: none; }
 .validity.err .vdot { background: var(--danger); }
 .validity.pending { color: var(--warn-text); }
 .validity.pending .vdot { background: var(--warn); }
+.validity.warn { color: var(--warn-text); }
+.validity.warn .vdot { background: var(--warn); }
 
 /* Карточка подборки: коллаж-обложка, название, число треков.
  * Главный «продуктовый» preview правой колонки. */

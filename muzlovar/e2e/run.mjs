@@ -665,8 +665,13 @@ const scenarios = [
       await dragFromPalette(page, "оценка", atBottom(last));
       mix = await waitFreshMix(page, mix);
       await page.click("#e-save"); // «Проверить» — финальная валидация
+      // Успех — «ok» либо «warn»: предупреждения (избыточные условия
+      // и т. п.) не блокируют валидацию и не влияют на порядок узлов.
       await page.waitForFunction(
-        () => (document.getElementById("e-validity") || {}).className?.includes("ok"),
+        () => {
+          const c = (document.getElementById("e-validity") || {}).className || "";
+          return c.includes("ok") || c.includes("warn");
+        },
         null,
         { timeout: 10000 },
       );

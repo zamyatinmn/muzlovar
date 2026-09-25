@@ -5,6 +5,7 @@
 -- 'compilePlaylistDto' и обратные переводы @.mix@/@.nsp@ -> DTO.
 module DtoTests (dtoTests) where
 
+import Control.Monad (forM_)
 import Data.Aeson (Value (..), decode, eitherDecode, encode, object, toJSON, (.=))
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
@@ -82,6 +83,30 @@ assertDtoError name dto path needle = testCase name $
                 <> show es
             )
         _ -> pure ()
+
+-- | Компиляция DTO должна завершиться ошибкой валидации с фрагментом
+-- сообщения.
+assertCompileError :: TestName -> PlaylistDto -> Text -> TestTree
+assertCompileError name dto needle = testCase name $
+  case compilePlaylistDto dto of
+    Right _ -> assertFailure "ожидалась ошибка компиляции"
+    Left [] -> assertFailure "список ошибок пуст"
+    Left es ->
+      assertBool
+        ("нет фрагмента «" <> T.unpack needle <> "»; получено: " <> show (map aeMessage es))
+        (any (\e -> needle `T.isInfixOf` aeMessage e) es)
+
+-- | Компиляция успешна, и .nsp содержит все перечисленные фрагменты.
+assertNspContains :: TestName -> PlaylistDto -> [Text] -> TestTree
+assertNspContains name dto needles = testCase name $
+  case compilePlaylistDto dto of
+    Left es -> assertFailure ("ошибки компиляции: " <> show es)
+    Right c -> do
+      let nsp = TE.decodeUtf8 (LBS.toStrict (cmpNsp c))
+      forM_ needles $ \needle ->
+        assertBool
+          ("нет «" <> T.unpack needle <> "» в .nsp: " <> T.unpack nsp)
+          (needle `T.isInfixOf` nsp)
 
 ------------------------------------------------------------------------------
 -- JSON-контракт
@@ -288,6 +313,18 @@ roundTripTests =
     , goldenRoundTrip "forgotten-favorites"
     , goldenRoundTrip "eighties-rock"
     , goldenRoundTrip "missing-metadata"
+    , goldenRoundTrip "recent-discoveries"
+    , goldenRoundTrip "playlist-links"
+    , testCase "dateDto: compile -> dtoFromMix -> тот же DTO" $
+        case compilePlaylistDto dateDto of
+          Left es -> assertFailure ("ошибки компиляции: " <> show es)
+          Right c -> dtoFromMix (cmpMix c) @?= Right dateDto
+    , testCase "dateDto: compile -> nspToDto -> тот же DTO" $
+        case compilePlaylistDto dateDto of
+          Left es -> assertFailure ("ошибки компиляции: " <> show es)
+          Right c -> case (eitherDecode (cmpNsp c) :: Either String Value) of
+            Left e -> assertFailure (".nsp не разбирается: " <> e)
+            Right v -> nspToDto v @?= Right dateDto
     ]
 
 -- | Golden @.mix@ -> DTO -> канонический @.mix@ -> тот же DTO.
@@ -345,6 +382,59 @@ nspToDtoTests =
         assertBool "ожидался Left" (isLeft (nspFrom "{\"name\":\"X\",\"all\":5}"))
     , testCase "лимит не целое -> Left" $
         assertBool "ожидался Left" (isLeft (nspFrom "{\"name\":\"X\",\"all\":[],\"limit\":\"x\"}"))
+    , testCase "before с датой -> условие DSL" $
+        nspFrom "{\"name\":\"X\",\"all\":[{\"before\":{\"lastplayed\":\"2024-06-01\"}}]}"
+          @?= Right
+            ( PlaylistDto
+                "X"
+                Nothing
+                False
+                ( GroupDto
+                    "all"
+                    [ ItemCond (CondDto "последнее_прослушивание" "before" (Just (String "2024-06-01"))) ]
+                )
+                Nothing
+                Nothing
+            )
+    , testCase "after с датой -> условие DSL" $
+        nspFrom "{\"name\":\"X\",\"all\":[{\"after\":{\"dateadded\":\"2024-01-01\"}}]}"
+          @?= Right
+            ( PlaylistDto
+                "X"
+                Nothing
+                False
+                (GroupDto "all" [ItemCond (CondDto "добавлено" "after" (Just (String "2024-01-01")))])
+                Nothing
+                Nothing
+            )
+    , testCase "inTheRange с датами -> между" $
+        nspFrom "{\"name\":\"X\",\"all\":[{\"inTheRange\":{\"dateadded\":[\"2024-01-01\",\"2024-12-31\"]}}]}"
+          @?= Right
+            ( PlaylistDto
+                "X"
+                Nothing
+                False
+                ( GroupDto
+                    "all"
+                    [ ItemCond
+                        ( CondDto
+                            "добавлено"
+                            "between"
+                            (Just (toJSON [String "2024-01-01", String "2024-12-31"]))
+                        )
+                    ]
+                )
+                Nothing
+                Nothing
+            )
+    , testCase "before без корректной даты -> raw" $
+        case nspFrom "{\"name\":\"X\",\"all\":[{\"before\":{\"lastplayed\":\"вчера\"}}]}" of
+          Left e -> assertFailure (T.unpack e)
+          Right dto -> containsRawDto dto @?= True
+    , testCase "inTheRange с не-датовыми строками -> raw" $
+        case nspFrom "{\"name\":\"X\",\"all\":[{\"inTheRange\":{\"dateadded\":[\"a\",\"b\"]}}]}" of
+          Left e -> assertFailure (T.unpack e)
+          Right dto -> containsRawDto dto @?= True
     , testCase "файл не объект -> Left" $
         assertBool "ожидался Left" (isLeft (nspFrom "[1,2]"))
     ]
@@ -474,6 +564,370 @@ duplicateFieldTests =
     ]
 
 ------------------------------------------------------------------------------
+-- Дробные числа (ReplayGain)
+------------------------------------------------------------------------------
+
+-- | Подборка с дробными значениями ReplayGain: сравнение и границы.
+decimalDto :: PlaylistDto
+decimalDto =
+  (simpleDto "Дробный ReplayGain")
+    { pdRoot =
+        GroupDto
+          "all"
+          [ ItemCond (CondDto "replaygain" "gt" (Just (Number (-6.5))))
+          , ItemCond (CondDto "replaygain" "between" (Just (toJSON [Number (-8), Number (-4.5)])))
+          ]
+    }
+
+decimalTests :: TestTree
+decimalTests =
+  testGroup
+    "Дробные значения ReplayGain"
+    [ testCase ".mix/.nsp сохраняют дробные значения" $
+        case compilePlaylistDto decimalDto of
+          Left es -> assertFailure ("ошибки компиляции: " <> show es)
+          Right c -> do
+            let mix = cmpMix c
+                nsp = TE.decodeUtf8 (LBS.toStrict (cmpNsp c))
+            assertBool ("нет -6.5 в .mix: " <> T.unpack mix) ("-6.5" `T.isInfixOf` mix)
+            assertBool ("нет -4.5 в .mix: " <> T.unpack mix) ("-4.5" `T.isInfixOf` mix)
+            assertBool ("нет -6.5 в .nsp: " <> T.unpack nsp) ("-6.5" `T.isInfixOf` nsp)
+            assertBool ("нет -4.5 в .nsp: " <> T.unpack nsp) ("-4.5" `T.isInfixOf` nsp)
+    , testCase "dtoFromMix(compile(decimal)) == decimal" $
+        case compilePlaylistDto decimalDto of
+          Left es -> assertFailure ("ошибки компиляции: " <> show es)
+          Right c -> dtoFromMix (cmpMix c) @?= Right decimalDto
+    , testCase "nspToDto(compile(decimal)) == decimal" $
+        case compilePlaylistDto decimalDto of
+          Left es -> assertFailure ("ошибки компиляции: " <> show es)
+          Right c -> case (eitherDecode (cmpNsp c) :: Either String Value) of
+            Left e -> assertFailure (".nsp не разбирается: " <> e)
+            Right v -> nspToDto v @?= Right decimalDto
+    , testCase "nspToDto: дробный .nsp разбирается в DSL-дерево" $
+        nspFrom "{\"name\":\"X\",\"all\":[{\"gt\":{\"rgtrackgain\":-6.5}}]}"
+          @?= Right
+            ( PlaylistDto
+                "X"
+                Nothing
+                False
+                (GroupDto "all" [ItemCond (CondDto "replaygain" "gt" (Just (Number (-6.5))))])
+                Nothing
+                Nothing
+            )
+    ]
+
+------------------------------------------------------------------------------
+-- Датовые условия
+------------------------------------------------------------------------------
+
+-- | Подборка с абсолютными датами: сравнение, «до», диапазон дат.
+dateDto :: PlaylistDto
+dateDto =
+  (simpleDto "Свежие находки")
+    { pdRoot =
+        GroupDto
+          "all"
+          [ ItemCond (CondDto "последнее_прослушивание" "before" (Just (String "2024-06-01")))
+          , ItemCond (CondDto "добавлено" "between" (Just (toJSON [String "2024-01-01", String "2024-12-31"])))
+          , ItemCond (CondDto "последнее_прослушивание" "ne" (Just (String "2020-01-01")))
+          ]
+    }
+
+------------------------------------------------------------------------------
+-- Членство в подборке (inPlaylist / notInPlaylist)
+------------------------------------------------------------------------------
+
+-- | Операнд членства в DTO: @{kind, value}@.
+linkValue :: Text -> Text -> Value
+linkValue kind value = object ["kind" .= kind, "value" .= value]
+
+-- | Подборка с двумя условиями членства: по id и по пути к файлу.
+playlistDto :: PlaylistDto
+playlistDto =
+  (simpleDto "Ссылки")
+    { pdRoot =
+        GroupDto
+          "all"
+          [ ItemCond (CondDto "подборка" "inPlaylist" (Just (linkValue "id" "abc-123")))
+          , ItemCond (CondDto "подборка" "notInPlaylist" (Just (linkValue "path" "other.nsp")))
+          ]
+    }
+
+playlistLinkTests :: TestTree
+playlistLinkTests =
+  testGroup
+    "Членство в подборке"
+    [ testCase ".mix/.nsp сохраняют членство в подборке" $
+        case compilePlaylistDto playlistDto of
+          Left es -> assertFailure ("ошибки компиляции: " <> show es)
+          Right c -> do
+            let mix = cmpMix c
+                nsp = TE.decodeUtf8 (LBS.toStrict (cmpNsp c))
+            assertBool
+              ("нет «в подборке id» в .mix: " <> T.unpack mix)
+              ("в подборке id \"abc-123\"" `T.isInfixOf` mix)
+            assertBool
+              ("нет «не в подборке файл» в .mix: " <> T.unpack mix)
+              ("не в подборке файл \"other.nsp\"" `T.isInfixOf` mix)
+            assertBool ("нет inPlaylist в .nsp: " <> T.unpack nsp) ("inPlaylist" `T.isInfixOf` nsp)
+            assertBool
+              ("нет notInPlaylist в .nsp: " <> T.unpack nsp)
+              ("notInPlaylist" `T.isInfixOf` nsp)
+    , testCase "dtoFromMix(compile(playlist)) == playlist" $
+        case compilePlaylistDto playlistDto of
+          Left es -> assertFailure ("ошибки компиляции: " <> show es)
+          Right c -> dtoFromMix (cmpMix c) @?= Right playlistDto
+    , testCase "nspToDto(compile(playlist)) == playlist" $
+        case compilePlaylistDto playlistDto of
+          Left es -> assertFailure ("ошибки компиляции: " <> show es)
+          Right c -> case (eitherDecode (cmpNsp c) :: Either String Value) of
+            Left e -> assertFailure (".nsp не разбирается: " <> e)
+            Right v -> nspToDto v @?= Right playlistDto
+    , testCase "пустая ссылка: ошибка валидации" $
+        let dto =
+              (simpleDto "Ссылки")
+                { pdRoot =
+                    GroupDto "all" [ItemCond (CondDto "подборка" "inPlaylist" (Just (linkValue "id" "")))]
+                }
+         in case compilePlaylistDto dto of
+              Right _ -> assertFailure "ожидалась ошибка валидации"
+              Left [] -> assertFailure "список ошибок пуст"
+              Left es ->
+                assertBool
+                  ("нет сообщения о пустом идентификаторе: " <> show (map aeMessage es))
+                  (any ("Идентификатор подборки не может быть пустым" `T.isInfixOf`) (map aeMessage es))
+    , assertDtoError
+        "оператор только для поля подборка"
+        (baseDto (oneCond (CondDto "название" "inPlaylist" (Just (linkValue "id" "abc")))))
+        "/root/items/0"
+        "применим только к полю"
+    , testCase "nspToDto: inPlaylist с id -> условие DSL (не raw)" $
+        nspFrom "{\"name\":\"X\",\"all\":[{\"inPlaylist\":{\"id\":\"abc-123\"}}]}"
+          @?= Right
+            ( PlaylistDto
+                "X"
+                Nothing
+                False
+                (GroupDto "all" [ItemCond (CondDto "подборка" "inPlaylist" (Just (linkValue "id" "abc-123")))])
+                Nothing
+                Nothing
+            )
+    , testCase "nspToDto: notInPlaylist с path -> условие DSL (не raw)" $
+        case nspFrom "{\"name\":\"X\",\"all\":[{\"notInPlaylist\":{\"path\":\"other.nsp\"}}]}" of
+          Left e -> assertFailure (T.unpack e)
+          Right dto -> do
+            containsRawDto dto @?= False
+            dto
+              @?= PlaylistDto
+                "X"
+                Nothing
+                False
+                ( GroupDto
+                    "all"
+                    [ ItemCond (CondDto "подборка" "notInPlaylist" (Just (linkValue "path" "other.nsp"))) ]
+                )
+                Nothing
+                Nothing
+    , testCase "nspToDto: неизвестный вид ссылки -> raw" $
+        case nspFrom "{\"name\":\"X\",\"all\":[{\"inPlaylist\":{\"title\":\"a\"}}]}" of
+          Left e -> assertFailure (T.unpack e)
+          Right dto -> containsRawDto dto @?= True
+    , testCase "nspToDto: не-объект ссылки -> raw" $
+        case nspFrom "{\"name\":\"X\",\"all\":[{\"inPlaylist\":\"abc\"}]}" of
+          Left e -> assertFailure (T.unpack e)
+          Right dto -> containsRawDto dto @?= True
+    ]
+
+------------------------------------------------------------------------------
+-- Поля реестра (e2e: DTO → NSP)
+------------------------------------------------------------------------------
+
+-- | Единая заготовка: подборка с одним условием по новому полю.
+newCond :: Text -> Text -> Maybe Value -> PlaylistDto
+newCond fld op mv = baseDto (oneCond (CondDto fld op mv))
+
+registryFieldDtoTests :: TestTree
+registryFieldDtoTests =
+  testGroup
+    "Поля реестра (e2e DTO)"
+    [ assertNspContains
+        "целое поле: номер_трека"
+        (newCond "номер_трека" "eq" (Just (Number 3)))
+        ["\"tracknumber\": 3"]
+    , assertNspContains
+        "дробное поле: длительность"
+        (newCond "длительность" "gt" (Just (Number 200.5)))
+        ["\"duration\": 200.5"]
+    , assertNspContains
+        "текстовое поле: кодек"
+        (newCond "кодек" "eq" (Just (String "MP3")))
+        ["\"codec\": \"MP3\""]
+    , assertNspContains
+        "наличие: темп отсутствует"
+        (newCond "темп" "isMissing" Nothing)
+        ["\"isMissing\"", "\"bpm\""]
+    , assertNspContains
+        "логическое поле: сборник"
+        (newCond "сборник" "eq" (Just (Bool True)))
+        ["\"compilation\": true"]
+    , assertNspContains
+        "дата: дата_релиза"
+        (newCond "дата_релиза" "after" (Just (String "2020-01-01")))
+        ["\"after\"", "\"releasedate\": \"2020-01-01\""]
+    , assertNspContains
+        "альбомное поле: прослушиваний_альбома"
+        (newCond "прослушиваний_альбома" "gt" (Just (Number 10)))
+        ["\"albumplaycount\": 10"]
+    , assertNspContains
+        "артистное поле: оценка_артиста"
+        (newCond "оценка_артиста" "eq" (Just (Number 5)))
+        ["\"artistrating\": 5"]
+    , assertNspContains
+        "MusicBrainz ID: mbid_артиста"
+        (newCond "mbid_артиста" "eq" (Just (String "abc-123")))
+        ["\"mbz_artist_id\": \"abc-123\""]
+    , assertNspContains
+        "алиас replaygain_track_gain => rgtrackgain"
+        (newCond "replaygain_track_gain" "gt" (Just (Number (-6.5))))
+        ["\"rgtrackgain\": -6.5"]
+    , assertNspContains
+        "алиас replaygain_track_peak => rgtrackpeak"
+        (newCond "replaygain_track_peak" "isMissing" Nothing)
+        ["\"rgtrackpeak\""]
+    , assertNspContains
+        "алиас replaygain_album_gain => rgalbumgain"
+        (newCond "replaygain_album_gain" "gt" (Just (Number (-1.5))))
+        ["\"rgalbumgain\": -1.5"]
+    , assertNspContains
+        "алиас replaygain_album_peak => rgalbumpeak"
+        (newCond "replaygain_album_peak" "gt" (Just (Number (-0.997))))
+        ["\"rgalbumpeak\": -0.997"]
+    , assertNspContains
+        "алиас lastPlayed в сортировке => -lastplayed"
+        ((newCond "любимое" "eq" (Just (Bool True))) {pdSort = Just (SortFieldsDto [SortItemDto "lastPlayed" "desc"])})
+        ["\"sort\": \"-lastplayed\""]
+    , assertCompileError
+        "дробь на целочисленном поле"
+        (newCond "номер_трека" "eq" (Just (Number 2.5)))
+        "должно быть целым числом"
+    , assertCompileError
+        "наличие на поле без признака"
+        (newCond "библиотека" "isMissing" Nothing)
+        "не поддерживает проверку наличия"
+    , assertCompileError
+        "значение вне границ рейтинга альбома"
+        (newCond "оценка_альбома" "eq" (Just (Number 7)))
+        "вне допустимого диапазона"
+    ]
+
+------------------------------------------------------------------------------
+-- Регистр имён без учёта регистра (как Navidrome LookupField)
+------------------------------------------------------------------------------
+
+-- | Обратный перевод и компиляция с другим регистром имён: поле и
+-- сортировка канонизируются в DSL-/NSP-имена реестра, исходное
+-- написание не протекает ни в @.nsp@, ни в @.mix@-раунд-трип.
+caseInsensitiveDtoTests :: TestTree
+caseInsensitiveDtoTests =
+  testGroup
+    "Регистр имён"
+    [ testCase "nspToDto: NSP-имя в верхнем регистре -> DSL-имя" $
+        nspFrom "{\"name\":\"X\",\"all\":[{\"is\":{\"TITLE\":\"a\"}}]}"
+          @?= Right
+            ( PlaylistDto
+                "X"
+                Nothing
+                False
+                (GroupDto "all" [ItemCond (CondDto "название" "eq" (Just (String "a")))])
+                Nothing
+                Nothing
+            )
+    , testCase "nspToDto: алиас в верхнем регистре -> своя запись" $
+        nspFrom "{\"name\":\"X\",\"all\":[{\"gt\":{\"REPLAYGAIN_ALBUM_GAIN\":-1.5}}]}"
+          @?= Right
+            ( PlaylistDto
+                "X"
+                Nothing
+                False
+                ( GroupDto
+                    "all"
+                    [ ItemCond (CondDto "replaygain_альбом" "gt" (Just (Number (-1.5)))) ]
+                )
+                Nothing
+                Nothing
+            )
+    , testCase "nspToDto: алиас replaygain_album_peak -> своя запись" $
+        nspFrom "{\"name\":\"X\",\"all\":[{\"gt\":{\"replaygain_album_peak\":-0.997}}]}"
+          @?= Right
+            ( PlaylistDto
+                "X"
+                Nothing
+                False
+                ( GroupDto
+                    "all"
+                    [ ItemCond (CondDto "replaygain_пик_альбом" "gt" (Just (Number (-0.997)))) ]
+                )
+                Nothing
+                Nothing
+            )
+    , testCase "nspToDto: sort в разном регистре -> DSL-имя" $
+        case nspFrom "{\"name\":\"X\",\"all\":[],\"sort\":\"-PlayCount\"}" of
+          Left e -> assertFailure (T.unpack e)
+          Right dto ->
+            pdSort dto @?= Just (SortFieldsDto [SortItemDto "прослушиваний" "desc"])
+    , testCase "compilePlaylistDto: смешанный регистр -> канонический .nsp" $
+        case compilePlaylistDto mixedDto of
+          Left es -> assertFailure ("ошибки компиляции: " <> show es)
+          Right c -> do
+            let nsp = TE.decodeUtf8 (LBS.toStrict (cmpNsp c))
+            assertBool
+              ("нет \"title\": \"Тест\" в .nsp: " <> T.unpack nsp)
+              ("\"title\": \"Тест\"" `T.isInfixOf` nsp)
+            assertBool
+              ("нет \"playcount\": 5 в .nsp: " <> T.unpack nsp)
+              ("\"playcount\": 5" `T.isInfixOf` nsp)
+            assertBool
+              ("сортировка не каноническая: " <> T.unpack nsp)
+              ("\"sort\": \"title\"" `T.isInfixOf` nsp)
+            assertBool
+              ("протекло TITLE: " <> T.unpack nsp)
+              (not ("TITLE" `T.isInfixOf` nsp))
+            assertBool
+              ("протекло ПРОСЛУШИВАНИЙ: " <> T.unpack nsp)
+              (not ("ПРОСЛУШИВАНИЙ" `T.isInfixOf` nsp))
+    , testCase "dtoFromMix(compile(смешанный регистр)) == канонический DTO" $
+        case compilePlaylistDto mixedDto of
+          Left es -> assertFailure ("ошибки компиляции: " <> show es)
+          Right c -> dtoFromMix (cmpMix c) @?= Right mixedDtoCanonical
+    ]
+
+-- | Подборка с полями и сортировкой в верхнем регистре.
+mixedDto :: PlaylistDto
+mixedDto =
+  (simpleDto "Регистр")
+    { pdRoot =
+        GroupDto
+          "all"
+          [ ItemCond (CondDto "TITLE" "eq" (Just (String "Тест")))
+          , ItemCond (CondDto "ПРОСЛУШИВАНИЙ" "gt" (Just (Number 5)))
+          ]
+    , pdSort = Just (SortFieldsDto [SortItemDto "TITLE" "asc"])
+    }
+
+-- | Тот же DTO после раунд-трипа: все имена канонические.
+mixedDtoCanonical :: PlaylistDto
+mixedDtoCanonical =
+  mixedDto
+    { pdRoot =
+        GroupDto
+          "all"
+          [ ItemCond (CondDto "название" "eq" (Just (String "Тест")))
+          , ItemCond (CondDto "прослушиваний" "gt" (Just (Number 5)))
+          ]
+    , pdSort = Just (SortFieldsDto [SortItemDto "название" "asc"])
+    }
+
+------------------------------------------------------------------------------
 -- Итоговый набор
 ------------------------------------------------------------------------------
 
@@ -487,4 +941,8 @@ dtoTests =
     , roundTripTests
     , nspToDtoTests
     , duplicateFieldTests
+    , decimalTests
+    , playlistLinkTests
+    , registryFieldDtoTests
+    , caseInsensitiveDtoTests
     ]

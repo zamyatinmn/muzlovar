@@ -84,7 +84,7 @@ import Nspeller.Muzlovar.Types
   , Compiled (cmpMix, cmpNsp)
   , PlaylistDto
   , apiError
-  , compilePlaylistDto
+  , compilePlaylistDtoWarnings
   , pdName
   )
 import Nspeller.Schema (schemaJson)
@@ -254,9 +254,9 @@ routes cfg = do
     parsed <- parseDtoBody
     case parsed of
       Left errs -> respondErrors status422 errs
-      Right dto -> case compilePlaylistDto dto of
+      Right dto -> case compilePlaylistDtoWarnings dto of
         Left errs -> respondErrors status422 errs
-        Right compiled ->
+        Right (compiled, warns) ->
           json $
             object
               [ "ok" .= True
@@ -267,6 +267,9 @@ routes cfg = do
               , "mix" .= LT.fromStrict (cmpMix compiled)
               , "nsp" .= LTE.decodeUtf8 (cmpNsp compiled)
               , "errors" .= ([] :: [ApiError])
+              , -- Неблокирующие предупреждения (код "warning"):
+                -- избыточные условия, покрытие домена поля и т. п.
+                "warnings" .= warns
               ]
 
   post "/api/playlists" $ do

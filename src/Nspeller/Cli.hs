@@ -30,7 +30,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Nspeller.Ast (CompileError (..), fileError, renderCompileError)
-import Nspeller.Compiler (compileText)
+import Nspeller.Compiler (compileTextWithWarnings)
 import Nspeller.Navidrome (encodeNsp)
 import Options.Applicative
 import System.Directory
@@ -120,6 +120,17 @@ putErrors errs =
       [] -> ["Внутренняя ошибка: список ошибок пуст."]
       xs -> map renderCompileError xs
 
+-- | Печатает предупреждения в stderr тем же форматом, что и ошибки,
+-- но помеченными — они не влияют на результат команды.
+putWarnings :: [CompileError] -> IO ()
+putWarnings [] = pure ()
+putWarnings warns =
+  hPutStr stderr . T.unpack . (`T.snoc` '\n') . T.intercalate "\n\n" $
+    ("Предупреждения (" <> tshow (length warns) <> "):") : map renderCompileError warns
+  where
+    tshow :: Show a => a -> Text
+    tshow = T.pack . show
+
 -- | Читает файл строго как UTF-8.
 readMixFile :: FilePath -> IO (Either [CompileError] Text)
 readMixFile fp = do
@@ -141,9 +152,12 @@ checkFile fp = do
   readRes <- readMixFile fp
   case readRes of
     Left errs -> putErrors errs >> pure False
-    Right src -> case compileText fp src of
+    Right src -> case compileTextWithWarnings fp src of
       Left errs -> putErrors errs >> pure False
-      Right _ -> putStrLn ("OK: " <> fp) >> pure True
+      Right (_, warns) -> do
+        putWarnings warns
+        putStrLn ("OK: " <> fp)
+        pure True
 
 ------------------------------------------------------------------------------
 -- build
@@ -174,9 +188,10 @@ buildFile fp mOut = do
   readRes <- readMixFile fp
   case readRes of
     Left errs -> putErrors errs >> pure False
-    Right src -> case compileText fp src of
+    Right src -> case compileTextWithWarnings fp src of
       Left errs -> putErrors errs >> pure False
-      Right nsp -> do
+      Right (nsp, warns) -> do
+        putWarnings warns
         let target = fromMaybe (nspPathFor fp) mOut
         writeRes <- writeAtomic target (encodeNsp nsp)
         case writeRes of
@@ -214,13 +229,14 @@ buildAll inDir outDir = do
             readRes <- readMixFile srcPath
             pure $ case readRes of
               Left errs -> Left errs
-              Right src -> case compileText srcPath src of
+              Right src -> case compileTextWithWarnings srcPath src of
                 Left errs -> Left errs
-                Right nsp -> Right (target, encodeNsp nsp)
+                Right (nsp, warns) -> Right (target, encodeNsp nsp, warns)
           case concat [errs | Left errs <- compiled] of
             errs@(_ : _) -> putErrors errs >> pure False
             [] -> do
-              let outputs = [(target, bytes) | Right (target, bytes) <- compiled]
+              mapM_ putWarnings [ws | Right (_, _, ws) <- compiled]
+              let outputs = [(target, bytes) | Right (target, bytes, _) <- compiled]
               results <- forM outputs $ \(target, bytes) -> do
                 writeRes <- writeAtomic target bytes
                 pure $ case writeRes of

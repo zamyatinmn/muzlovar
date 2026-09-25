@@ -34,6 +34,7 @@ module Nspeller.Muzlovar.Types
     -- * Конвейер сохранения
   , Compiled (..)
   , compilePlaylistDto
+  , compilePlaylistDtoWarnings
 
     -- * Обратные переводы
   , validToDto
@@ -56,16 +57,18 @@ import Data.Bifunctor (first)
 import qualified Data.ByteString.Lazy as LBS
 import Data.List (sortBy)
 import qualified Data.List.NonEmpty as NE
-import Data.Maybe (fromMaybe, isNothing)
+import Data.Maybe (fromMaybe, isJust, isNothing)
+import Data.Scientific (Scientific)
 import Data.Ord (comparing)
 import Data.Ratio (denominator)
 import Data.Text (Text)
 import qualified Data.Text as T
+import Data.Time.Calendar (Day)
 import Nspeller.Ast
 import Nspeller.Navidrome (encodeNsp, toNsp)
 import Nspeller.Parser (parsePlaylist)
 import Nspeller.Render (renderParsedFile)
-import Nspeller.Validation (validatePlaylist)
+import Nspeller.Validation (validatePlaylist, validatePlaylistWithWarnings)
 
 ------------------------------------------------------------------------------
 -- Ошибки API
@@ -335,40 +338,121 @@ dtoToParsed dto = do
 condToRaw :: CondDto -> Either Text RawCond
 condToRaw (CondDto field op mval) = case op of
   "bare" -> Right (RBare field)
-  "eq" -> bin OpEq
-  "ne" -> bin OpNe
-  "gt" -> bin OpGt
-  "lt" -> bin OpLt
+  "eq" -> cmp OpEq
+  "ne" -> cmp OpNe
+  "gt" -> cmp OpGt
+  "ge" -> cmp OpGe
+  "lt" -> cmp OpLt
+  "le" -> cmp OpLe
+  "before" -> cmp OpBefore
+  "after" -> cmp OpAfter
   "contains" -> bin OpContains
   "notContains" -> bin OpNotContains
   "startsWith" -> bin OpStartsWith
   "endsWith" -> bin OpEndsWith
   "between" -> do
     v <- need
-    case arrVals v of
-      [Number a, Number b]
-        | isIntegral a && isIntegral b ->
-            Right (RBetween field (realToInteger a) (realToInteger b))
-      _ -> Left "оператор «между» ожидает пару границ [от, до]"
+    if isDateField field
+      then case arrVals v of
+        [String a, String b] -> do
+          da <- dateText a
+          db <- dateText b
+          pure (RDateBetween field da db)
+        _ -> Left dateExpected
+      else case arrVals v of
+        [Number a, Number b] -> Right (RBetween field a b)
+        _ -> Left "оператор «между» ожидает пару границ [от, до]"
   "inTheLast" -> RRelative field <$> needDays
   "notInTheLast" -> do
     days <- needDays
-    if field == fieldDslName LastPlayed || field == fieldName LastPlayed
+    if isNotPlayedField field
       then Right (RNotPlayed days)
-      else
-        Left
-          ( "оператор «не звучало N дней» применим только к полю «"
-              <> fieldDslName LastPlayed
-              <> "»"
-          )
+      -- «Не за N дней» применимо к любому датовому полю ('isDateField'):
+      -- у поля, отмеченного возможностью 'CapNotPlayed' в реестре,
+      -- остаётся сахар 'RNotPlayed' — конкретное поле здесь не
+      -- называется.
+      else if isDateField field
+        then Right (RNotRelative field days)
+        else
+          Left
+            ( "оператор «не звучало N дней» применим только к датовым полям, получено поле «"
+                <> field
+                <> "»"
+            )
   "isMissing" -> Right (RPresence field Absent)
   "isPresent" -> Right (RPresence field Present)
+  "inPlaylist" -> playlist InPlaylist
+  "notInPlaylist" -> playlist NotInPlaylist
   other -> Left ("неизвестный оператор «" <> other <> "»")
   where
+    -- Членство в подборке: поле всегда «подборка», операнд DTO —
+    -- объект {kind: "id"|"path", value: "..."}. Пустая ссылка
+    -- проходит здесь структурно и отклоняется валидацией.
+    playlist m
+      | field /= playlistRefDslName =
+          Left
+            ( "оператор «"
+                <> op
+                <> "» применим только к полю «"
+                <> playlistRefDslName
+                <> "»"
+            )
+      | otherwise = do
+          v <- need
+          case v of
+            Object fo -> do
+              kind <- case KM.lookup "kind" fo of
+                Just (String k) -> case k of
+                  "id" -> Right RefId
+                  "path" -> Right RefPath
+                  _ -> Left (refKindErr k)
+                _ -> Left refShapeDoc
+              value <- case KM.lookup "value" fo of
+                Just (String t) -> Right t
+                _ -> Left refShapeDoc
+              pure (RPlaylist m (PlaylistRef kind value))
+            _ -> Left refShapeDoc
+
+    refKindErr :: Text -> Text
+    refKindErr k =
+      "неизвестный вид ссылки на подборку «" <> k <> "», ожидается «id» или «path»"
+
+    refShapeDoc :: Text
+    refShapeDoc = "ожидается ссылка на подборку вида {kind: «id»|«path», value: «...»}"
+
     bin o = do
       v <- need
       rv <- toRawValue v
       pure (RBin field o rv)
+
+    -- Оператор сравнения: на датовом поле операнд обязан быть датой
+    -- @ГГГГ-ММ-ДД@, на остальных — прежний разбор значения.
+    cmp o
+      | isDateField field = RBin field o <$> dateOperand
+      | otherwise = bin o
+
+    dateOperand = do
+      v <- need
+      case v of
+        String t -> RVDate <$> dateText t
+        _ -> Left dateExpected
+
+    dateText :: Text -> Either Text Day
+    dateText t = maybe (Left dateExpected) Right (parseDay t)
+
+    dateExpected :: Text
+    dateExpected = "ожидается дата в формате ГГГГ-ММ-ДД"
+
+    isDateField :: Text -> Bool
+    isDateField fname = case fieldByName fname of
+      Just (SomeField f) -> fieldValueType f == DateType
+      Nothing -> False
+
+    -- Поле — цель сахара «не звучало N дней»: признак берётся из
+    -- реестра по возможности 'CapNotPlayed', а не по конкретному полю.
+    isNotPlayedField :: Text -> Bool
+    isNotPlayedField fname =
+      maybe False (someFieldHasCapability CapNotPlayed) (fieldByName fname)
 
     need = case mval of
       Nothing -> Left ("условие с оператором «" <> op <> "» не содержит значение")
@@ -385,9 +469,9 @@ condToRaw (CondDto field op mval) = case op of
     toRawValue = \case
       String t -> Right (RVText t)
       Bool b -> Right (RVBool b)
-      Number n
-        | isIntegral n -> Right (RVNumber (realToInteger n))
-        | otherwise -> Left "ожидается целое число"
+      -- Числа принимаются любые: дробный операнд целочисленного
+      -- поля отклонит 'Nspeller.Validation' с точной ошибкой.
+      Number n -> Right (RVNumber n)
       _ -> Left "неподдерживаемое значение условия"
 
 ------------------------------------------------------------------------------
@@ -406,17 +490,32 @@ data Compiled = Compiled
 -- Ошибки структуры получают путь до элемента; ошибки разбора и
 -- валидации — строку и столбец в каноническом @.mix@, а путь до
 -- элемента вычисляется по позиции в разобранном дереве.
+--
+-- Предупреждения возвращаются отдельным списком ('compilePlaylistDtoWarnings')
+-- и на результат не влияют; здесь они отбрасываются.
 compilePlaylistDto :: PlaylistDto -> Either [ApiError] Compiled
-compilePlaylistDto dto = do
+compilePlaylistDto = fmap fst . compilePlaylistDtoWarnings
+
+-- | Как 'compilePlaylistDto', но возвращает также предупреждения
+-- валидации — в формате 'ApiError' с кодом @"warning"@ и позицией в
+-- каноническом @.mix@. Предупреждения появляются только при
+-- успешной компиляции и никогда не останавливают её.
+compilePlaylistDtoWarnings ::
+  PlaylistDto ->
+  Either [ApiError] (Compiled, [ApiError])
+compilePlaylistDtoWarnings dto = do
   parsed0 <- first dtoErrorsToApi (dtoToParsed dto)
   let mix = renderParsedFile parsed0
   parsed <-
     first (compileErrorsToApi "parse" mix Nothing . pure) $
       parsePlaylist "<playlist>" mix
-  valid <-
+  (valid, warns) <-
     first (compileErrorsToApi "validation" mix (Just parsed)) $
-      validatePlaylist "<playlist>" mix parsed
-  pure (Compiled mix (encodeNsp (toNsp valid)))
+      validatePlaylistWithWarnings "<playlist>" mix parsed
+  pure
+    ( Compiled mix (encodeNsp (toNsp valid))
+    , compileErrorsToApi "warning" mix (Just parsed) warns
+    )
 
 -- | Превращение ошибок компиляции в структурированные ошибки API.
 --
@@ -467,7 +566,7 @@ validToDto vp =
     sortDto = \case
       SortRandomMode -> SortRandomDto
       SortBy items ->
-        SortFieldsDto [SortItemDto (sortFieldDslName f) (dir d) | SortItem f d <- items]
+        SortFieldsDto [SortItemDto f (dir d) | SortItem f d <- items]
     dir SortAsc = "asc"
     dir SortDesc = "desc"
 
@@ -486,14 +585,23 @@ condItemDto = ItemCond . condDto
       VBool f True -> CondDto (fieldDslName f) "bare" Nothing
       VBool f False -> CondDto (fieldDslName f) "eq" (Just (Bool False))
       VRelative f InTheLast days ->
-        CondDto (fieldDslName f) "inTheLast" (Just (numValue days))
-      VRelative _ NotInTheLast days ->
-        CondDto (fieldDslName LastPlayed) "notInTheLast" (Just (numValue days))
-      VPresence p Absent -> CondDto (presenceFieldDslName p) "isMissing" Nothing
-      VPresence p Present -> CondDto (presenceFieldDslName p) "isPresent" Nothing
+        CondDto (fieldDslName f) "inTheLast" (Just (numValue (fromIntegral days)))
+      VRelative f NotInTheLast days ->
+        CondDto (fieldDslName f) "notInTheLast" (Just (numValue (fromIntegral days)))
+      VDate f op d ->
+        CondDto (fieldDslName f) (dateOpId op) (Just (String (formatDay d)))
+      VDateRange f lo hi ->
+        CondDto
+          (fieldDslName f)
+          "between"
+          (Just (toJSON [String (formatDay lo), String (formatDay hi)] :: Value))
+      VPresence (SomeField f) Absent -> CondDto (fieldDslName f) "isMissing" Nothing
+      VPresence (SomeField f) Present -> CondDto (fieldDslName f) "isPresent" Nothing
+      VPlaylist m ref ->
+        CondDto playlistRefDslName (membershipOpId m) (Just (playlistRefDtoValue ref))
 
-    numValue :: Integer -> Value
-    numValue n = Number (fromInteger n)
+    numValue :: Scientific -> Value
+    numValue n = Number n
 
 textOpId :: TextOp -> Text
 textOpId = \case
@@ -509,7 +617,32 @@ numOpId = \case
   NEq -> "eq"
   NNe -> "ne"
   NGt -> "gt"
+  NGe -> "ge"
   NLt -> "lt"
+  NLe -> "le"
+
+dateOpId :: DateOp -> Text
+dateOpId = \case
+  DEq -> "eq"
+  DNe -> "ne"
+  DGt -> "gt"
+  DGe -> "ge"
+  DLt -> "lt"
+  DLe -> "le"
+  DBefore -> "before"
+  DAfter -> "after"
+
+-- | Идентификатор DSL оператора членства в подборке.
+membershipOpId :: PlaylistMembership -> Text
+membershipOpId = \case
+  InPlaylist -> "inPlaylist"
+  NotInPlaylist -> "notInPlaylist"
+
+-- | Ссылка на подборку → JSON-операнд DTO: @{"kind": "id"|"path",
+-- "value": "..."}@.
+playlistRefDtoValue :: PlaylistRef -> Value
+playlistRefDtoValue (PlaylistRef kind value) =
+  object ["kind" .= playlistRefKindId kind, "value" .= value]
 
 ------------------------------------------------------------------------------
 -- .nsp JSON → DTO
@@ -567,6 +700,10 @@ condItemFromNsp v = case v of
     | [(k, val)] <- KM.toList o -> case Key.toString k of
         "all" -> grp "all" val
         "any" -> grp "any" val
+        -- inPlaylist/notInPlaylist разбираются до binOp: их операнд —
+        -- ссылка {"id"|"path": строка}, а не поле-значение.
+        "inPlaylist" -> playlistCond "inPlaylist" val
+        "notInPlaylist" -> playlistCond "notInPlaylist" val
         opName -> binOp opName val
   _ -> ItemRaw v
   where
@@ -574,10 +711,25 @@ condItemFromNsp v = case v of
       [] | not (isArray val) -> ItemRaw v
       vals -> ItemGroup (GroupDto kind (map condItemFromNsp vals))
 
+    -- Ссылка на подборку → условие DTO; невыражимая ссылка (не
+    -- объект, не строка, неизвестный вид) остаётся raw-узлом.
+    playlistCond opName val = case val of
+      Object fo -> case KM.toList fo of
+        [(fk, String t)] -> case Key.toString fk of
+          "id" ->
+            ItemCond (CondDto playlistRefDslName opName (Just (linkValue "id" t)))
+          "path" ->
+            ItemCond (CondDto playlistRefDslName opName (Just (linkValue "path" t)))
+          _ -> ItemRaw v
+        _ -> ItemRaw v
+      _ -> ItemRaw v
+
+    linkValue kind t = object ["kind" .= (kind :: Text), "value" .= t]
+
     binOp opName val = case val of
       Object fo
         | [(fk, fv)] <- KM.toList fo ->
-            case (opDsl opName, fieldDsl (Key.toString fk), nspCondValue opName fv) of
+            case (opDsl opName, fieldDsl (Key.toString fk), nspCondValue opName (Key.toString fk) fv) of
               (Just op, Just fld, Just mval) -> ItemCond (CondDto fld op mval)
               _ -> ItemRaw v
       _ -> ItemRaw v
@@ -585,6 +737,10 @@ condItemFromNsp v = case v of
     fieldDsl n = case fieldByName (T.pack n) of
       Just (SomeField f) -> Just (fieldDslName f)
       Nothing -> Nothing
+
+    isDateNsp n = case fieldByName (T.pack n) of
+      Just (SomeField f) -> fieldValueType f == DateType
+      Nothing -> False
 
     -- Оператор NSP → идентификатор DSL; Nothing — неизвестный.
     opDsl = \case
@@ -599,6 +755,8 @@ condItemFromNsp v = case v of
       "inTheRange" -> Just "between"
       "inTheLast" -> Just "inTheLast"
       "notInTheLast" -> Just "notInTheLast"
+      "before" -> Just "before"
+      "after" -> Just "after"
       "isMissing" -> Just "isMissing"
       "isPresent" -> Just "isPresent"
       _ -> Nothing
@@ -606,18 +764,23 @@ condItemFromNsp v = case v of
     -- Значение условия NSP → операнд DTO: Just (Just v) — со значением,
     -- Just Nothing — без значения (проверка наличия),
     -- Nothing — не выражимо в DSL.
-    nspCondValue opName fv = case opName of
+    nspCondValue opName nspName fv = case opName of
       "is" -> Just (Just fv)
       "isNot" -> Just (Just fv)
-      "gt" -> numOnly fv
-      "lt" -> numOnly fv
+      -- gt/lt: число для числовых полей, строка-дата для датовых.
+      "gt" -> cmpValue nspName fv
+      "lt" -> cmpValue nspName fv
+      "before" -> dateOnly fv
+      "after" -> dateOnly fv
       "contains" -> strOnly fv
       "notContains" -> strOnly fv
       "startsWith" -> strOnly fv
       "endsWith" -> strOnly fv
       "inTheRange" -> case arrVals fv of
-        [Number a, Number b]
-          | isIntegral a && isIntegral b -> Just (Just (toJSON [Number a, Number b] :: Value))
+        [Number _, Number _] -> Just (Just fv)
+        [String a, String b]
+          | isDateNsp nspName && isJust (parseDay a) && isJust (parseDay b) ->
+              Just (Just fv)
         _ -> Nothing
       "inTheLast" -> daysOnly fv
       "notInTheLast" -> daysOnly fv
@@ -625,8 +788,10 @@ condItemFromNsp v = case v of
       "isPresent" -> boolTrue fv
       _ -> Nothing
 
+    -- Числовые операнды принимаются любыми (дробные в т. ч.):
+    -- дробность запрещает только валидация целочисленных полей.
     numOnly fv = case fv of
-      Number n | isIntegral n -> Just (Just fv)
+      Number _ -> Just (Just fv)
       _ -> Nothing
     strOnly fv = case fv of
       String _ -> Just (Just fv)
@@ -637,6 +802,13 @@ condItemFromNsp v = case v of
     boolTrue fv = case fv of
       Bool True -> Just Nothing
       _ -> Nothing
+    -- Абсолютная дата: строка @ГГГГ-ММ-ДД@ (см. 'parseDay').
+    dateOnly fv = case fv of
+      String t | isJust (parseDay t) -> Just (Just fv)
+      _ -> Nothing
+    cmpValue nspName fv
+      | isDateNsp nspName = dateOnly fv
+      | otherwise = numOnly fv
 
 -- | Строка сортировки @.nsp@ → DTO; неизвестные поля — сырой текст.
 nspSortDto :: Text -> Maybe SortDto
@@ -654,7 +826,7 @@ nspSortDto t
             Just rest -> ("desc", rest)
             Nothing -> ("asc", T.strip chunk)
        in case sortFieldByName name of
-            Just f -> Just (SortItemDto (sortFieldDslName f) dir)
+            Just f -> Just (SortItemDto f dir)
             Nothing -> Nothing
 
 ------------------------------------------------------------------------------

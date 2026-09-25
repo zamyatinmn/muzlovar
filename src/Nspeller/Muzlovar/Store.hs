@@ -107,6 +107,7 @@ import Data.Time.Clock (UTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import Data.Word (Word8, Word64)
 import Numeric (showHex)
+import Nspeller.Ast (formatNumber)
 import Nspeller.Muzlovar.Types
   ( ApiError (..)
   , Compiled (..)
@@ -444,7 +445,7 @@ valueText = \case
   Just (String t) -> "«" <> t <> "»"
   Just (Bool True) -> "да"
   Just (Bool False) -> "нет"
-  Just (Number n) -> tshow n
+  Just (Number n) -> formatNumber n
   Just (Array arr) -> case foldr (:) [] arr of
     [x, y] -> valueText (Just x) <> " … " <> valueText (Just y)
     _ -> "…"

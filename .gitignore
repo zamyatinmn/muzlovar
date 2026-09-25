@@ -7,3 +7,7 @@ cabal.project.local
 *.o
 *.exe
 *.tmp
+
+# Локальные данные dev-сервера Muzlovar (дефолтный стор ./rules, ./playlists)
+rules/
+playlists/

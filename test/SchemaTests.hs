@@ -7,7 +7,7 @@
 module SchemaTests (schemaTests) where
 
 import Control.Monad (forM_)
-import Data.Aeson (Value (..), toJSON)
+import Data.Aeson (Value (..), object, toJSON, (.=))
 import Data.Aeson.Key (Key)
 import qualified Data.Aeson.KeyMap as KM
 import Data.Either (isRight)
@@ -60,36 +60,152 @@ variantsAt (Object o) = case KM.lookup "valueVariants" o of
   _ -> Nothing
 variantsAt _ = Nothing
 
+-- | Закрытой набор (enum) поля из JSON: пары (значение, подпись)
+-- или 'Nothing', если ключа/массива нет.
+enumAt :: Key -> Value -> Maybe [(Text, Text)]
+enumAt k (Object o) = case KM.lookup k o of
+  Just (Array v) -> Just [(textAt "value" x, textAt "label" x) | x <- foldr (:) [] v]
+  _ -> Nothing
+enumAt _ _ = Nothing
+
 -- | Категория значения поля из JSON.
 valueTypeOf :: Value -> ValueType
 valueTypeOf f = case textAt "valueType" f of
   "text" -> TextType
   "number" -> NumberType
   "bool" -> BoolType
+  "playlistRef" -> PlaylistRefType
   _ -> DateType
 
 ------------------------------------------------------------------------------
 -- Структура схемы
 ------------------------------------------------------------------------------
 
--- | Ожидаемые идентификаторы 12 полей DSL.
+-- | Ожидаемые идентификаторы 72 полей DSL (в порядке палитры:
+-- «Логика», «История», «Метаданные», «Аудио», «Файлы», «Альбом»,
+-- «Артист», «Идентификаторы», «Ссылки»).
 dslFieldIds :: [Text]
 dslFieldIds =
-  [ "название"
-  , "альбом"
-  , "жанр"
-  , "explicit"
-  , "год"
+  [ -- «Логика»
+    "любимое"
   , "оценка"
-  , "прослушиваний"
-  , "replaygain"
-  , "любимое"
+  , "средняя_оценка"
   , "обложка"
+  , "сборник"
+  , -- «История»
+    "прослушиваний"
   , "последнее_прослушивание"
   , "добавлено"
+  , "дата_любимого"
+  , "дата_оценки"
+  , -- «Метаданные»
+    "название"
+  , "альбом"
+  , "жанр"
+  , "год"
+  , "explicit"
+  , "дата_записи"
+  , "оригинальный_год"
+  , "оригинальная_дата"
+  , "год_релиза"
+  , "дата_релиза"
+  , "номер_трека"
+  , "номер_диска"
+  , "подзаголовок_диска"
+  , "комментарий"
+  , "текст_песни"
+  , "сортировка_названия"
+  , "сортировка_альбома"
+  , "сортировка_артиста"
+  , "сортировка_альбомного_артиста"
+  , "номер_в_каталоге"
+  , "replaygain"
+  , "replaygain_пик"
+  , "replaygain_альбом"
+  , "replaygain_пик_альбом"
+  , -- «Аудио»
+    "длительность"
+  , "кодек"
+  , "битрейт"
+  , "битовая_глубина"
+  , "частота_дискретизации"
+  , "темп"
+  , "каналы"
+  , -- «Файлы»
+    "путь_к_файлу"
+  , "тип_файла"
+  , "размер"
+  , "изменено"
+  , "файл_отсутствует"
+  , -- «Альбом»
+    "комментарий_альбома"
+  , "оценка_альбома"
+  , "любимый_альбом"
+  , "прослушиваний_альбома"
+  , "последнее_прослушивание_альбома"
+  , "дата_любимого_альбома"
+  , "дата_оценки_альбома"
+  , "дата_добавления_альбома"
+  , "дата_изменения_альбома"
+  , "длительность_альбома"
+  , "треков_в_альбоме"
+  , "размер_альбома"
+  , -- «Артист»
+    "оценка_артиста"
+  , "любимый_артист"
+  , "прослушиваний_артиста"
+  , "последнее_прослушивание_артиста"
+  , "дата_любимого_артиста"
+  , "дата_оценки_артиста"
+  , -- «Идентификаторы»
+    "mbid_альбома"
+  , "mbid_альбомного_артиста"
+  , "mbid_артиста"
+  , "mbid_записи"
+  , "mbid_трека_релиза"
+  , "mbid_группы_релизов"
+  , "библиотека"
+  , -- «Ссылки»
+    "подборка"
   ]
 
--- | Ожидаемые идентификаторы 14 операторов.
+-- | Персональные поля в порядке реестра (18 штук).
+personalFieldIds :: [Text]
+personalFieldIds =
+  [ "любимое"
+  , "оценка"
+  , "прослушиваний"
+  , "последнее_прослушивание"
+  , "дата_любимого"
+  , "дата_оценки"
+  , "оценка_альбома"
+  , "любимый_альбом"
+  , "прослушиваний_альбома"
+  , "последнее_прослушивание_альбома"
+  , "дата_любимого_альбома"
+  , "дата_оценки_альбома"
+  , "оценка_артиста"
+  , "любимый_артист"
+  , "прослушиваний_артиста"
+  , "последнее_прослушивание_артиста"
+  , "дата_любимого_артиста"
+  , "дата_оценки_артиста"
+  ]
+
+-- | Поля, значения которых Navidrome хранит дробными (неполные
+-- 'fsIntegral'): ReplayGain, длительности и средняя оценка.
+nonIntegralFieldIds :: [Text]
+nonIntegralFieldIds =
+  [ "replaygain"
+  , "replaygain_пик"
+  , "replaygain_альбом"
+  , "replaygain_пик_альбом"
+  , "длительность"
+  , "длительность_альбома"
+  , "средняя_оценка"
+  ]
+
+-- | Ожидаемые идентификаторы 20 операторов.
 dslOperatorIds :: [Text]
 dslOperatorIds =
   [ "eq"
@@ -99,14 +215,35 @@ dslOperatorIds =
   , "startsWith"
   , "endsWith"
   , "gt"
+  , "ge"
   , "lt"
+  , "le"
   , "between"
   , "inTheLast"
   , "notInTheLast"
+  , "before"
+  , "after"
   , "isMissing"
   , "isPresent"
   , "bare"
+  , "inPlaylist"
+  , "notInPlaylist"
   ]
+
+-- | JSON-объект поля по идентификатору ('Data.Aeson.Null', если поле
+-- не найдено — тесты сверки упадут на несовпадении).
+fieldObj :: [Value] -> Text -> Value
+fieldObj fields fid = case [f | f <- fields, textAt "id" f == fid] of
+  (f : _) -> f
+  [] -> Null
+
+-- | Значение ключа объекта-значения ('Data.Aeson.Null', если ключа
+-- нет или это не объект).
+fieldKey :: Key -> Value -> Value
+fieldKey k (Object o) = case KM.lookup k o of
+  Just v -> v
+  Nothing -> Null
+fieldKey _ _ = Null
 
 schemaStructure :: TestTree
 schemaStructure = testCase "структура /api/schema" $ case schemaJson of
@@ -119,10 +256,10 @@ schemaStructure = testCase "структура /api/schema" $ case schemaJson of
         sortFields = textListAt "sortFields" schemaJson
         personal = textListAt "personalFields" schemaJson
     -- поля и операторы
-    length fields @?= 12
-    length ops @?= 14
-    length (nub ids) @?= 12
-    length (nub opIds) @?= 14
+    length fields @?= 72
+    length ops @?= 20
+    length (nub ids) @?= 72
+    length (nub opIds) @?= 20
     sort ids @?= sort dslFieldIds
     sort opIds @?= sort dslOperatorIds
     -- группы и направления сортировки
@@ -130,26 +267,66 @@ schemaStructure = testCase "структура /api/schema" $ case schemaJson of
     map (textAt "id") (arrayAt "sortDirections" schemaJson) @?= ["asc", "desc"]
     -- группы ингредиентов палитры: имя, порядок и принадлежность полей
     let ingredientIds = map (textAt "id") (arrayAt "ingredientGroups" schemaJson)
-    ingredientIds @?= ["logic", "history", "meta"]
+    ingredientIds
+      @?= ["logic", "history", "meta", "audio", "files", "album", "artist", "ids", "links"]
     map (textAt "name") (arrayAt "ingredientGroups" schemaJson)
-      @?= ["Логика", "История", "Метаданные"]
+      @?= ["Логика", "История", "Метаданные", "Аудио", "Файлы", "Альбом", "Артист", "Идентификаторы", "Ссылки"]
     forM_ fields $ \f ->
       assertBool
         ("поле " <> T.unpack (textAt "id" f) <> " не отнесено к группе ингредиентов")
         (textAt "group" f `elem` ingredientIds)
     -- персональные поля
-    personal @?= ["любимое", "оценка", "прослушиваний", "последнее_прослушивание"]
+    personal @?= personalFieldIds
     assertBool
       ("персональные поля не входят в список полей: " <> show personal)
       (all (`elem` ids) personal)
-    -- поля сортировки = поля с флагом sortable
-    length sortFields @?= 10
+    -- поля сортировки = поля с флагом sortable (все, кроме «подборка»)
+    length sortFields @?= 71
     sortFields @?= [textAt "id" f | f <- fields, boolAt "sortable" f]
-    assertBool "булево поле входит в сортировку" (all (`notElem` ["любимое", "обложка"]) sortFields)
-    -- закрытый набор значений только у булевых полей
-    forM_ fields $ \f ->
+    assertBool
+      "логические поля не входят в сортировку"
+      (all (`elem` sortFields) ["любимое", "обложка"])
+    assertBool "псевдополе «подборка» не сортируется" ("подборка" `notElem` sortFields)
+    -- закрытый набор значений только у булевых полей; enum — только
+    -- у explicit (значения e/c/"" с подписями)
+    forM_ fields $ \f -> do
       variantsAt f
         @?= (if valueTypeOf f == BoolType then Just ["да", "нет"] else Nothing)
+      enumAt "enum" f
+        @?= ( if textAt "id" f == "explicit"
+                then Just [("e", "Explicit"), ("c", "Clean"), ("", "Не определено")]
+                else Nothing
+            )
+    -- признак целостности чисел: дробными объявлены ровно ReplayGain,
+    -- длительности и средняя оценка
+    forM_ fields $ \f ->
+      boolAt "integral" f @?= (textAt "id" f `notElem` nonIntegralFieldIds)
+    -- виды ссылки: только у поля подборка (id + путь к файлу)
+    forM_ fields $ \f ->
+      enumAt "refKinds" f
+        @?= ( if textAt "id" f == "подборка"
+                then Just [("id", "ID"), ("path", "путь к файлу")]
+                else Nothing
+            )
+    -- ограничения числовых полей совпадают с валидацией ядра:
+    -- рейтинги 0..5 шаг 1, счётчики/размеры ≥ 0 шаг 1, длительности
+    -- ≥ 0 без шага, годы и идентификаторы без границ
+    fieldKey "min" (fieldObj fields "оценка") @?= toJSON (0 :: Integer)
+    fieldKey "max" (fieldObj fields "оценка") @?= toJSON (5 :: Integer)
+    fieldKey "step" (fieldObj fields "оценка") @?= toJSON (1 :: Integer)
+    fieldKey "min" (fieldObj fields "оценка_альбома") @?= toJSON (0 :: Integer)
+    fieldKey "max" (fieldObj fields "оценка_альбома") @?= toJSON (5 :: Integer)
+    fieldKey "step" (fieldObj fields "оценка_альбома") @?= toJSON (1 :: Integer)
+    fieldKey "min" (fieldObj fields "прослушиваний") @?= toJSON (0 :: Integer)
+    fieldKey "max" (fieldObj fields "прослушиваний") @?= Null
+    fieldKey "step" (fieldObj fields "прослушиваний") @?= toJSON (1 :: Integer)
+    fieldKey "min" (fieldObj fields "размер") @?= toJSON (0 :: Integer)
+    fieldKey "step" (fieldObj fields "размер") @?= toJSON (1 :: Integer)
+    fieldKey "min" (fieldObj fields "длительность") @?= toJSON (0 :: Integer)
+    fieldKey "step" (fieldObj fields "длительность") @?= Null
+    fieldKey "min" (fieldObj fields "год") @?= Null
+    fieldKey "max" (fieldObj fields "год") @?= Null
+    fieldKey "min" (fieldObj fields "библиотека") @?= Null
     -- названия полей заполнены
     forM_ fields $ \f ->
       assertBool
@@ -163,26 +340,46 @@ schemaStructure = testCase "структура /api/schema" $ case schemaJson of
 
 -- | Значение-кандидат для проверки «поле × оператор»: нейтральное,
 -- чтобы не пройти валидацию из-под значения, когда оператор
--- совместим с полем.
-probeValue :: ValueType -> Text -> Maybe Value
-probeValue vt op = case op of
+-- совместим с полем. Для поля с enum-набором равенство берёт
+-- допустимое значение (см. 'fieldEnum'); для датового поля —
+-- дату @ГГГГ-ММ-ДД@ (и пару дат у диапазона).
+probeValue :: Text -> ValueType -> Text -> Maybe Value
+probeValue fid vt op = case op of
   "bare" -> Nothing
   "isMissing" -> Nothing
   "isPresent" -> Nothing
-  "between" -> Just (toJSON ([1, 2] :: [Integer]))
+  "between" -> betweenValue
   "inTheLast" -> Just (Number 7)
   "notInTheLast" -> Just (Number 7)
-  "gt" -> Just (Number 1)
-  "lt" -> Just (Number 1)
+  "gt" -> cmpValue
+  "ge" -> cmpValue
+  "lt" -> cmpValue
+  "le" -> cmpValue
+  "before" -> cmpValue
+  "after" -> cmpValue
   "eq" -> eqValue
   "ne" -> eqValue
+  "inPlaylist" -> refValue
+  "notInPlaylist" -> refValue
   _ -> Just (String "икра")
   where
+    -- Операнд сравнения: дата для датового поля, число — иначе.
+    cmpValue = case vt of
+      DateType -> Just (String "2020-01-01")
+      _ -> Just (Number 1)
+    betweenValue = case vt of
+      DateType -> Just (toJSON [String "2019-01-01", String "2019-12-31"])
+      _ -> Just (toJSON ([1, 2] :: [Integer]))
     eqValue = case vt of
-      TextType -> Just (String "икра")
+      TextType
+        | fid == "explicit" -> Just (String "e")
+        | otherwise -> Just (String "икра")
       NumberType -> Just (Number 1)
       BoolType -> Just (Bool False)
-      DateType -> Just (Number 1)
+      DateType -> Just (String "2020-01-01")
+      PlaylistRefType -> refValue
+    -- Ссылка на подборку: операнд inPlaylist/notInPlaylist.
+    refValue = Just (object ["kind" .= ("id" :: Text), "value" .= ("abc-123" :: Text)])
 
 -- | Подборка ровно с одним условием.
 probeDto :: Text -> Text -> Maybe Value -> PlaylistDto
@@ -199,16 +396,17 @@ schemaValidationAgreement :: TestTree
 schemaValidationAgreement = testCase "операторы схемы совпадают с валидацией" $ do
   let fields = arrayAt "fields" schemaJson
       opIds = map (textAt "id") (arrayAt "operators" schemaJson)
-  length fields @?= 12
-  length opIds @?= 14
+  length fields @?= 72
+  length opIds @?= 20
   forM_ fields $ \f -> do
     let fid = textAt "id" f
-        ops = textListAt "operators" f
+        -- операторы поля — объекты @{id, valueType}@ (см. 'FieldOp')
+        ops = map (textAt "id") (arrayAt "operators" f)
         vt = valueTypeOf f
         pres = boolAt "presence" f
     forM_ opIds $ \op -> do
       let expected = op `elem` ops || (pres && op `elem` ["isMissing", "isPresent"])
-          actual = isRight (compilePlaylistDto (probeDto fid op (probeValue vt op)))
+          actual = isRight (compilePlaylistDto (probeDto fid op (probeValue fid vt op)))
       assertEqual (T.unpack (fid <> " × " <> op)) expected actual
 
 ------------------------------------------------------------------------------
@@ -268,9 +466,25 @@ validationMessages =
         "структурная ошибка -> invalid_tree"
         ((probeDto "название" "eq" (Just (String "x"))) {pdName = ""})
         "invalid_tree"
+    , msgTest
+        "enumErr: значение вне набора explicit"
+        (probeDto "explicit" "eq" (Just (String "икра")))
+        "не входит в допустимые значения"
+    , msgTest
+        "enumErr: перечень допустимых значений"
+        (probeDto "explicit" "eq" (Just (String "икра")))
+        "Допустимо: «e» (Explicit), «c» (Clean), «» (Не определено)."
+    , msgTest
+        "fractionalErr: дробное значение целочисленного поля"
+        (probeDto "год" "gt" (Just (Number 1.5)))
+        "Значение 1.5 должно быть целым числом."
+    , msgTest
+        "fractionalErr: поле не поддерживает дробные значения"
+        (probeDto "год" "between" (Just (toJSON [Number 1980, Number 1980.5])))
+        "не поддерживает дробные значения"
     , codeTest
-        "notInTheLast не для последнего прослушивания -> invalid_tree"
-        (probeDto "добавлено" "notInTheLast" (Just (Number 7)))
+        "notInTheLast не для датового поля -> invalid_tree"
+        (probeDto "жанр" "notInTheLast" (Just (Number 7)))
         "invalid_tree"
     ]
 

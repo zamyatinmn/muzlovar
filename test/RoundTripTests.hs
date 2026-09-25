@@ -107,6 +107,29 @@ bareThenNotPlayed = testCase "обложка + не звучало на след
   stripParsed p2 @?= stripParsed p1
   renderParsedFile p2 @?= r1
 
+-- | Датовые условия: абсолютные даты (в т.ч. в кавычках), «до»/
+-- «после», пара @>=@/@<=@ и диапазон переживают parse -> render
+-- -> parse без изменений.
+dateRoundTrip :: TestTree
+dateRoundTrip = testCase "абсолютные даты: parse -> render -> parse" $ do
+  let src =
+        "подборка \"Свежее\"\n\
+        \где все {\n\
+        \  добавлено >= 2024-01-01\n\
+        \  добавлено <= 2024-12-31\n\
+        \  последнее_прослушивание до \"2024-06-01\"\n\
+        \  последнее_прослушивание != 2020-01-01\n\
+        \  любое {\n\
+        \    не звучало 30 дней\n\
+        \    добавлено между 2024-01-01 и 2024-12-31\n\
+        \  }\n\
+        \}\n"
+  p1 <- parseOrFail "test.mix" src
+  let r1 = renderParsedFile p1
+  p2 <- parseOrFail "test.mix" r1
+  stripParsed p2 @?= stripParsed p1
+  renderParsedFile p2 @?= r1
+
 ------------------------------------------------------------------------------
 -- Свойство для сгенерированных подборок
 ------------------------------------------------------------------------------
@@ -141,7 +164,10 @@ roundTripTests =
         [ goldenRoundTrip "forgotten-favorites"
         , goldenRoundTrip "eighties-rock"
         , goldenRoundTrip "missing-metadata"
+        , goldenRoundTrip "recent-discoveries"
+        , goldenRoundTrip "playlist-links"
         ]
+    , dateRoundTrip
     , bareThenNotPlayed
     , testProperty "DTO -> render -> parse сходится" prop_dtoRenderParse
     ]

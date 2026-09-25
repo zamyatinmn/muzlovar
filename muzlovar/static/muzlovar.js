@@ -98,13 +98,27 @@
     return [];
   }
 
-  function renderErrors(target, errors, heading) {
+  /* Ошибки и (опционально) предупреждения. Предупреждения кода
+   * «warning» не блокируют публикацию: при отсутствии ошибок бокс
+   * показывается в виде warn. */
+  function renderErrors(target, errors, heading, warnings) {
     if (!target) return;
+    warnings = warnings || [];
     clear(target);
-    if (!errors.length) { target.hidden = true; return; }
+    if (!errors.length && !warnings.length) { target.hidden = true; return; }
     target.hidden = false;
-    target.className = 'state error';
-    target.appendChild(el('h3', { text: heading || 'Ошибки' }));
+    target.className = errors.length ? 'state error' : 'state warn';
+    if (errors.length) {
+      target.appendChild(el('h3', { text: heading || 'Ошибки' }));
+      target.appendChild(errorList(errors));
+    }
+    if (warnings.length) {
+      target.appendChild(el('h3', { text: 'Предупреждения' }));
+      target.appendChild(errorList(warnings));
+    }
+  }
+
+  function errorList(errors) {
     var ul = el('ul', { class: 'error-list' });
     errors.forEach(function (e) {
       var li = el('li');
@@ -115,7 +129,7 @@
       if (pos.length) li.appendChild(el('span', { class: 'pos', text: ' — ' + pos.join(' · ') }));
       ul.appendChild(li);
     });
-    target.appendChild(ul);
+    return ul;
   }
 
   function fieldById(id) {
@@ -383,18 +397,128 @@
 
   function defaultCond(fieldId) {
     var f = fieldById(fieldId) || schema.fields[0];
-    var opId = f.operators[0];
+    var ids = opIds(f);
+    var opId = ids[0];
     return { id: newId(), type: 'cond', field: f.id, op: opId, value: defaultValue(f, opId) };
   }
 
+  /* Операторы поля: /api/schema отдаёт объекты {id, valueType};
+   * строки поддерживаются для совместимости со старыми ответами. */
+  function opIds(f) {
+    return (f.operators || []).map(function (o) {
+      return typeof o === 'string' ? o : o.id;
+    });
+  }
+
+  /* Категория операнда оператора (valueType в описании оператора
+   * поля): 'none' | 'text' | 'number' | 'bool' | 'date' | 'days' |
+   * 'numberRange' | 'dateRange' | 'playlistRef'. По ней выбирается
+   * редактор значения; если схема не знает оператора — выводится по
+   * полю. */
+  function opValueType(f, opId) {
+    var ops = (f && f.operators) || [];
+    for (var i = 0; i < ops.length; i++) {
+      if (typeof ops[i] !== 'string' && ops[i].id === opId) return ops[i].valueType;
+    }
+    return inferValueType(f, opId);
+  }
+
+  function inferValueType(f, opId) {
+    if (opId === 'bare' || opId === 'isMissing' || opId === 'isPresent') return 'none';
+    if (opId === 'inTheLast' || opId === 'notInTheLast') return 'days';
+    if (opId === 'before' || opId === 'after') return 'date';
+    if (opId === 'between') return (f && f.valueType === 'date') ? 'dateRange' : 'numberRange';
+    if (opId === 'inPlaylist' || opId === 'notInPlaylist') return 'playlistRef';
+    switch (f && f.valueType) {
+      case 'bool': return 'bool';
+      case 'number': return 'number';
+      case 'date': return 'date';
+      case 'playlistRef': return 'playlistRef';
+      default: return 'text';
+    }
+  }
+
+  /* Абсолютная дата в форме значения: ГГГГ-ММ-ДД. */
+  function isDay(v) {
+    return typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
+  }
+
+  /* Сегодняшняя дата в локальной таймзоне: ГГГГ-ММ-ДД с ведущими
+   * нулями — та же форма, что принимают ядро и Navidrome. */
+  function todayIso() {
+    var d = new Date();
+    var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+  }
+
+  /* Поле даты: input[type=date] со значением ГГГГ-ММ-ДД. */
+  function dateInput(value, setter, aria) {
+    return el('input', {
+      type: 'date',
+      value: isDay(value) ? value : todayIso(),
+      style: 'width:14ch',
+      'aria-label': aria || 'Значение',
+      disabled: editable ? null : 'disabled',
+      oninput: function (e) { setter(e.target.value); scheduleValidate(); }
+    });
+  }
+
+  /* Ограничения числового поля из схемы (min/max/step): те же
+   * значения проверяет валидатор ядра, поэтому UI просто не даёт
+   * выйти за них. Ключи попадают в атрибуты input[type=number].
+   * Для дробных полей (integral=false) шаг по умолчанию «any»:
+   * целочисленный step схемы для них не задаётся. */
+  function numAttrs(field) {
+    var a = {};
+    if (field.min !== null && field.min !== undefined) a.min = String(field.min);
+    if (field.max !== null && field.max !== undefined) a.max = String(field.max);
+    if (field.step !== null && field.step !== undefined) a.step = String(field.step);
+    else if (field.integral === false) a.step = 'any';
+    return a;
+  }
+
+  function addNumAttrs(attrs, field) {
+    var a = numAttrs(field);
+    Object.keys(a).forEach(function (k) { attrs[k] = a[k]; });
+    return attrs;
+  }
+
+  /* Приводит число к допустимому диапазону поля (само поле не
+   * переписывается — это делает ввод, чтобы не ломать набор текста). */
+  function clampNum(field, v) {
+    if (typeof v !== 'number' || isNaN(v)) v = 0;
+    if (field.min !== null && field.min !== undefined && v < field.min) v = field.min;
+    if (field.max !== null && field.max !== undefined && v > field.max) v = field.max;
+    return v;
+  }
+
   function defaultValue(field, op) {
-    if (op === 'bare' || op === 'isMissing' || op === 'isPresent') return null;
-    if (op === 'between') return [0, 100];
-    if (op === 'inTheLast' || op === 'notInTheLast') return 30;
-    switch (field.valueType) {
-      case 'bool': return false;
-      case 'number': return 0;
-      default: return '';
+    switch (opValueType(field, op)) {
+      case 'none':
+        return null;
+      case 'numberRange': {
+        var lo = clampNum(field, 0);
+        var hi = clampNum(field, 100);
+        if (lo > hi) hi = lo;
+        return [lo, hi];
+      }
+      case 'dateRange':
+        return [todayIso(), todayIso()];
+      case 'days':
+        return 30;
+      case 'playlistRef': {
+        var refKinds = (field && field.refKinds) || [];
+        return { kind: refKinds.length ? refKinds[0].id : '', value: '' };
+      }
+      case 'date':
+        return todayIso();
+      case 'bool':
+        return false;
+      case 'number':
+        return clampNum(field, 0);
+      default:
+        if (field.enum && field.enum.length) return field.enum[0].value;
+        return '';
     }
   }
 
@@ -405,16 +529,32 @@
   /* Текстовое значение условия — для дерева предпросмотра. */
   function condValueText(field, item) {
     if (!needsValue(item.op)) return '';
-    if (item.op === 'between') {
+    var vt = opValueType(field, item.op);
+    if (vt === 'numberRange' || vt === 'dateRange') {
       var v = item.value;
       return (Array.isArray(v) && v.length === 2) ? (v[0] + '–' + v[1]) : '';
     }
-    if (item.op === 'inTheLast' || item.op === 'notInTheLast') {
+    if (vt === 'days') {
       return String(item.value) + ' дн.';
+    }
+    if (vt === 'playlistRef') {
+      var rv = item.value;
+      if (!rv || typeof rv !== 'object') return '';
+      var kindLabel = rv.kind;
+      var refKinds = (field && field.refKinds) || [];
+      for (var r = 0; r < refKinds.length; r++) {
+        if (refKinds[r].id === rv.kind) kindLabel = refKinds[r].label;
+      }
+      return (kindLabel || rv.kind || '') + ': ' + (rv.value || '');
     }
     if (field && field.valueType === 'bool') {
       var variants = field.valueVariants || ['да', 'нет'];
       return item.value ? (variants[0] || 'да') : (variants[1] || 'нет');
+    }
+    if (field && field.enum && field.enum.length) {
+      for (var i = 0; i < field.enum.length; i++) {
+        if (field.enum[i].value === item.value) return field.enum[i].label;
+      }
     }
     if (item.value === null || item.value === undefined || item.value === '') return '';
     return String(item.value);
@@ -630,6 +770,7 @@
       case 'bool': return '✓';
       case 'number': return '#';
       case 'date': return '◷';
+      case 'playlistRef': return '⇄';
       default: return 'A';
     }
   }
@@ -907,7 +1048,8 @@
       onchange: function (e) {
         item.field = e.target.value;
         var nf = fieldById(item.field);
-        if (nf.operators.indexOf(item.op) < 0) item.op = nf.operators[0];
+        var ids = opIds(nf);
+        if (ids.indexOf(item.op) < 0) item.op = ids[0];
         item.value = defaultValue(nf, item.op);
         renderTree(); scheduleValidate(0);
       }
@@ -932,7 +1074,7 @@
         renderTree(); scheduleValidate(0);
       }
     });
-    f.operators.forEach(function (oid) {
+    opIds(f).forEach(function (oid) {
       var op = operatorById(oid);
       var o = el('option', {
         value: oid,
@@ -980,28 +1122,52 @@
   }
 
   function valueEditor(field, item) {
-    if (item.op === 'between') {
+    var vt = opValueType(field, item.op);
+
+    if (vt === 'numberRange') {
       if (!Array.isArray(item.value) || item.value.length !== 2) item.value = [0, 100];
+      item.value[0] = clampNum(field, item.value[0]);
+      item.value[1] = clampNum(field, item.value[1]);
       var wrap = el('span', { class: 'type-label', text: 'между' });
-      var lo = el('input', {
+      var lo = el('input', addNumAttrs({
         type: 'number', value: String(item.value[0]), style: 'width:8ch',
         'aria-label': 'Нижняя граница',
         disabled: editable ? null : 'disabled',
-        oninput: function (e) { item.value[0] = parseInt(e.target.value, 10) || 0; scheduleValidate(); }
-      });
-      var hi = el('input', {
+        oninput: function (e) {
+          item.value[0] = clampNum(field, parseFloat(e.target.value) || 0);
+          scheduleValidate();
+        },
+        onchange: function (e) { e.target.value = String(item.value[0]); }
+      }, field));
+      var hi = el('input', addNumAttrs({
         type: 'number', value: String(item.value[1]), style: 'width:8ch',
         'aria-label': 'Верхняя граница',
         disabled: editable ? null : 'disabled',
-        oninput: function (e) { item.value[1] = parseInt(e.target.value, 10) || 0; scheduleValidate(); }
-      });
+        oninput: function (e) {
+          item.value[1] = clampNum(field, parseFloat(e.target.value) || 0);
+          scheduleValidate();
+        },
+        onchange: function (e) { e.target.value = String(item.value[1]); }
+      }, field));
       wrap.appendChild(lo);
       wrap.appendChild(document.createTextNode(' и '));
       wrap.appendChild(hi);
       return wrap;
     }
 
-    if (item.op === 'inTheLast' || item.op === 'notInTheLast') {
+    if (vt === 'dateRange') {
+      if (!Array.isArray(item.value) || item.value.length !== 2 ||
+          !isDay(item.value[0]) || !isDay(item.value[1])) {
+        item.value = [todayIso(), todayIso()];
+      }
+      var dwrap = el('span', { class: 'type-label', text: 'между' });
+      dwrap.appendChild(dateInput(item.value[0], function (v) { item.value[0] = v; }, 'Нижняя граница'));
+      dwrap.appendChild(document.createTextNode(' и '));
+      dwrap.appendChild(dateInput(item.value[1], function (v) { item.value[1] = v; }, 'Верхняя граница'));
+      return dwrap;
+    }
+
+    if (vt === 'days') {
       if (typeof item.value !== 'number') item.value = 30;
       return el('span', { class: 'type-label', text: 'за N дней:' }, [
         el('input', {
@@ -1013,7 +1179,43 @@
       ]);
     }
 
-    if (field.valueType === 'bool') {
+    if (vt === 'date') {
+      if (!isDay(item.value)) item.value = todayIso();
+      return dateInput(item.value, function (v) { item.value = v; });
+    }
+
+    /* Ссылка на подборку: выбор вида (id/путь к файлу) и строка
+     * значения. Список видов приходит из схемы (field.refKinds) —
+     * фронтенд не хранит собственных списков. */
+    if (vt === 'playlistRef') {
+      var kinds = (field && field.refKinds) || [];
+      if (!item.value || typeof item.value !== 'object') item.value = {};
+      if (!kinds.some(function (k) { return k.id === item.value.kind; })) {
+        item.value.kind = kinds.length ? kinds[0].id : '';
+      }
+      if (typeof item.value.value !== 'string') item.value.value = '';
+      var rwrap = el('span', {});
+      var ksel = el('select', {
+        'aria-label': 'Вид ссылки',
+        disabled: editable ? null : 'disabled',
+        onchange: function (e) { item.value.kind = e.target.value; scheduleValidate(); }
+      });
+      kinds.forEach(function (k) {
+        var o = el('option', { value: k.id, text: k.label });
+        if (item.value.kind === k.id) o.selected = true;
+        ksel.appendChild(o);
+      });
+      rwrap.appendChild(ksel);
+      rwrap.appendChild(el('input', {
+        type: 'text', value: item.value.value, style: 'width:18ch;margin-left:6px',
+        'aria-label': 'Значение ссылки',
+        disabled: editable ? null : 'disabled',
+        oninput: function (e) { item.value.value = e.target.value; scheduleValidate(); }
+      }));
+      return rwrap;
+    }
+
+    if (vt === 'bool') {
       var sel = el('select', {
         'aria-label': 'Значение',
         disabled: editable ? null : 'disabled',
@@ -1028,14 +1230,37 @@
       return sel;
     }
 
-    if (field.valueType === 'number') {
+    if (vt === 'number') {
       if (typeof item.value !== 'number') item.value = 0;
-      return el('input', {
+      item.value = clampNum(field, item.value);
+      return el('input', addNumAttrs({
         type: 'number', value: String(item.value), style: 'width:12ch',
         'aria-label': 'Числовое значение',
         disabled: editable ? null : 'disabled',
-        oninput: function (e) { item.value = parseInt(e.target.value, 10) || 0; scheduleValidate(); }
+        oninput: function (e) {
+          item.value = clampNum(field, parseFloat(e.target.value) || 0);
+          scheduleValidate();
+        },
+        onchange: function (e) { e.target.value = String(item.value); }
+      }, field));
+    }
+
+    /* Закрытый набор значений (enum из схемы): обычный select, никакой
+     * логики вручную — подписи и значения приходят из /api/schema. */
+    if (field.enum && field.enum.length) {
+      var known = field.enum.some(function (v) { return v.value === item.value; });
+      if (typeof item.value !== 'string' || !known) item.value = field.enum[0].value;
+      var esel = el('select', {
+        'aria-label': 'Значение',
+        disabled: editable ? null : 'disabled',
+        onchange: function (e) { item.value = e.target.value; scheduleValidate(); }
       });
+      field.enum.forEach(function (v) {
+        var o = el('option', { value: v.value, text: v.label });
+        if (item.value === v.value) o.selected = true;
+        esel.appendChild(o);
+      });
+      return esel;
     }
 
     if (typeof item.value !== 'string') item.value = '';
@@ -1530,8 +1755,10 @@
     setValidity('pending', 'Проверяем…');
     api('/api/validate', { method: 'POST', body: model }).then(function (res) {
       var errs = errorsOf(res.data);
+      var warns = (res.data && Array.isArray(res.data.warnings)) ? res.data.warnings : [];
       lastValidateOk = res.ok && !errs.length;
-      renderErrors(els['e-errors'], errs, lastValidateOk ? '' : 'Подборка не прошла валидацию');
+      renderErrors(els['e-errors'], errs,
+        lastValidateOk ? '' : 'Подборка не прошла валидацию', warns);
       if (lastValidateOk && res.data.mix) {
         els['e-preview'].textContent = res.data.mix;
         els['e-preview'].parentNode.hidden = false;
@@ -1553,12 +1780,15 @@
         pendingSlug = res.data.slug;
       }
       updatePath();
-      setValidity(
-        lastValidateOk ? 'ok' : 'err',
-        lastValidateOk
-          ? 'Проверено — можно публиковать'
-          : 'Ошибки: ' + errs.length
-      );
+      if (lastValidateOk) {
+        // Предупреждения не блокируют публикацию — только сообщают.
+        setValidity(warns.length ? 'warn' : 'ok',
+          warns.length
+            ? 'Проверено — есть предупреждения: ' + warns.length
+            : 'Проверено — можно публиковать');
+      } else {
+        setValidity('err', 'Ошибки: ' + errs.length);
+      }
     }).catch(function () {
       renderErrors(els['e-errors'],
         [{ message: 'Сервер недоступен — проверка не выполнена.' }], 'Ошибка');

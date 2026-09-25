@@ -259,6 +259,10 @@ validateTests =
       -- итоговый slug (будущий filename) — блок «Опубликовано /
       -- Будет опубликовано» сравнивает его с опубликованным путём
       bodyField "slug" ok @?= Just (String (slugFromName (pdName validDto)))
+      -- предупреждения есть всегда (пустой массив, если их нет)
+      case bodyField "warnings" ok of
+        Just (Array _) -> pure ()
+        other -> assertFailure ("нет ключа warnings в ответе: " <> show other)
       -- структурная ошибка
       bad <- run1 app (sreq methodPost "/api/validate" "" (encode validDto {pdName = ""}) [authHeader])
       statusOf bad @?= 422

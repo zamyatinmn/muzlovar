@@ -1,4 +1,3 @@
-{-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 
@@ -10,10 +9,17 @@
 -- * валидированный ('ValidPlaylist'), типобезопасный AST;
 -- * описание ошибок компиляции ('CompileError') и их форматирование.
 --
--- Поля Navidrome представлены GADT 'Field', индексированным типом
--- значения поля. Это делает некорректные комбинации «поле/оператор»
--- непредставимыми в валидированном AST: конструктор 'VText' принимает
--- только 'Field' 'Text', 'VNumber' — только 'Field' 'Integer' и т. д.
+-- Поля Navidrome представлены ссылками 'FieldRef', индексированными
+-- типом значения поля. Это делает некорректные комбинации «поле/
+-- оператор» непредставимыми в валидированном AST: конструктор 'VText'
+-- принимает только 'FieldRef' 'Text', 'VNumber' — только 'FieldRef'
+-- 'Scientific' и т. д.
+--
+-- Метаданные полей (реестр 'defaultRegistry', имена, категории,
+-- операторы, признаки, возможности, ограничения) живут в
+-- 'Nspeller.Fields'; оттуда же приходят и переэкспортируются здесь
+-- типы полей, ссылок и сортировки — потребителям известен только
+-- этот модуль.
 module Nspeller.Ast
   ( -- * Позиции в исходнике
     Located (..)
@@ -28,19 +34,33 @@ module Nspeller.Ast
   , valueTypeDesc
   , valueTypeExpect
 
+    -- * Ссылки на подборки (членство в подборке)
+  , PlaylistRefKind (..)
+  , PlaylistRef (..)
+  , PlaylistMembership (..)
+  , playlistRefDslName
+  , playlistRefKindDsl
+  , playlistRefKindId
+
     -- * Поля Navidrome
-  , Field (..)
+  , FieldRef (..)
   , SomeField (..)
+  , FieldCapability (..)
+  , fieldHasCapability
+  , someFieldHasCapability
   , fieldName
   , fieldValueType
   , fieldByName
   , fieldDslName
   , fieldPresence
-  , PresenceField (..)
-  , presenceFieldName
-  , presenceFieldDslName
-  , presenceValueType
-  , boolFieldNames
+  , EnumVariant (..)
+  , fieldEnum
+  , fieldIsIntegral
+  , fieldMultivalue
+  , formatNumber
+  , isIntegralNumber
+  , formatDay
+  , parseDay
 
     -- * Разобранный (невалидированный) AST
   , ParsedFile (..)
@@ -51,6 +71,8 @@ module Nspeller.Ast
   , RawCond (..)
   , RawOp (..)
   , rawOpDesc
+  , NumConstraints (..)
+  , fieldNumConstraints
   , RawValue (..)
   , rawValueText
   , PresenceOp (..)
@@ -67,25 +89,28 @@ module Nspeller.Ast
   , TextOp (..)
   , NumOp (..)
   , RelOp (..)
+  , DateOp (..)
   , SortMode (..)
-  , SortField (..)
   , SortDir (..)
   , SortItem (..)
   , sortFieldName
   , sortFieldByName
-  , sortFieldDslName
 
     -- * Ошибки компиляции
   , CompileError (..)
   , renderCompileError
   ) where
 
-import Data.List (find)
 import Data.List.NonEmpty (NonEmpty (..))
 import qualified Data.List.NonEmpty as NE
+import Data.Ratio (denominator)
+import Data.Scientific (Scientific)
+import qualified Data.Scientific as Sci
 import Data.Text (Text)
 import qualified Data.Text as T
-import Data.Time.Calendar (Day)
+import Data.Time.Calendar (Day, fromGregorianValid, toGregorian)
+import Nspeller.Fields
+import Text.Read (readMaybe)
 
 ------------------------------------------------------------------------------
 -- Позиции и размещённые элементы
@@ -139,189 +164,56 @@ fileError :: FilePath -> Text -> CompileError
 fileError fp msg = CompileError fp Nothing "" 0 (msg :| [])
 
 ------------------------------------------------------------------------------
--- Категории значений
+-- Числа
 ------------------------------------------------------------------------------
 
--- | Категория значения, которую принимает поле.
-data ValueType
-  = TextType
-  | NumberType
-  | BoolType
-  | DateType
-  deriving (Eq, Show, Enum, Bounded)
-
--- | Описание категории для сообщений об ошибках
--- (используется в конструкции «Поле «x» имеет …»).
-valueTypeDesc :: ValueType -> Text
-valueTypeDesc = \case
-  TextType -> "текстовый тип"
-  NumberType -> "числовой тип"
-  BoolType -> "логический тип"
-  DateType -> "тип даты"
-
--- | Ожидаемый вид значения для сообщений об ошибках
--- (используется в конструкции «ожидается …»).
-valueTypeExpect :: ValueType -> Text
-valueTypeExpect = \case
-  TextType -> "текст"
-  NumberType -> "число"
-  BoolType -> "«да» или «нет»"
-  DateType -> "относительное сравнение «за N дней»"
-
-------------------------------------------------------------------------------
--- Поля
-------------------------------------------------------------------------------
-
--- | Поле Navidrome, индексированное типом его значения.
+-- | Каноническое текстовое представление числа для @.mix@ и
+-- сообщений об ошибках: целые — без дробной части (@1980@), иначе —
+-- без экспоненты и без хвостовых нулей (@-6.5@).
 --
--- Индекс гарантирует, что условие валидированного AST не может
--- сравнить текстовое поле числовым оператором: такой терм нельзя
--- даже написать, не нарушив типы.
-data Field a where
-  Title :: Field Text
-  Album :: Field Text
-  Genre :: Field Text
-  ExplicitStatus :: Field Text
-  Year :: Field Integer
-  Rating :: Field Integer
-  PlayCount :: Field Integer
-  RGTrackGain :: Field Integer
-  Loved :: Field Bool
-  HasCoverArt :: Field Bool
-  LastPlayed :: Field Day
-  DateAdded :: Field Day
+-- @show@ здесь нельзя использовать: он даёт @1980.0@ и ломает
+-- round-trip «парсер ⇄ рендер».
+formatNumber :: Scientific -> Text
+formatNumber s
+  | isIntegralNumber s = T.pack (Sci.formatScientific Sci.Fixed (Just 0) (Sci.normalize s))
+  | otherwise = T.pack (Sci.formatScientific Sci.Fixed Nothing (Sci.normalize s))
 
-deriving instance Eq (Field a)
+-- | Целое ли значение несёт число (@1980.0@ — целое, @-6.5@ — нет).
+isIntegralNumber :: Scientific -> Bool
+isIntegralNumber n = denominator (toRational n) == 1
 
-deriving instance Show (Field a)
+------------------------------------------------------------------------------
+-- Даты
+------------------------------------------------------------------------------
 
--- | Поле в динамической упаковке (для таблицы соответствия имён).
-data SomeField = forall a. SomeField (Field a)
-
--- | Каноническое имя поля в документации Navidrome.
-fieldName :: Field a -> Text
-fieldName = \case
-  Title -> "title"
-  Album -> "album"
-  Genre -> "genre"
-  ExplicitStatus -> "explicitstatus"
-  Year -> "year"
-  Rating -> "rating"
-  PlayCount -> "playcount"
-  RGTrackGain -> "rgtrackgain"
-  Loved -> "loved"
-  HasCoverArt -> "hascoverart"
-  LastPlayed -> "lastplayed"
-  DateAdded -> "dateadded"
-
--- | Категория значения поля.
-fieldValueType :: Field a -> ValueType
-fieldValueType = \case
-  Title -> TextType
-  Album -> TextType
-  Genre -> TextType
-  ExplicitStatus -> TextType
-  Year -> NumberType
-  Rating -> NumberType
-  PlayCount -> NumberType
-  RGTrackGain -> NumberType
-  Loved -> BoolType
-  HasCoverArt -> BoolType
-  LastPlayed -> DateType
-  DateAdded -> DateType
-
--- | Имя поля из DSL → поле.
-fieldByName :: Text -> Maybe SomeField
-fieldByName name =
-  case find matches table of
-    Just sf -> Just sf
-    Nothing -> Nothing
+-- | Каноническое текстовое представление даты для @.mix@, NSP и
+-- сообщений об ошибках: @ГГГГ-ММ-ДД@ с ведущими нулями
+-- (@2024-01-05@). Обратная операция к 'parseDay'.
+formatDay :: Day -> Text
+formatDay day =
+  let (y, m, d) = toGregorian day
+   in T.intercalate "-" [pad 4 y, pad 2 m, pad 2 d]
   where
-    table :: [SomeField]
-    table =
-      [ SomeField Title
-      , SomeField Album
-      , SomeField Genre
-      , SomeField ExplicitStatus
-      , SomeField Year
-      , SomeField Rating
-      , SomeField PlayCount
-      , SomeField RGTrackGain
-      , SomeField Loved
-      , SomeField HasCoverArt
-      , SomeField LastPlayed
-      , SomeField DateAdded
-      ]
-    matches (SomeField f) = name == fieldName f || name == fieldDslName f
+    pad :: Show a => Int -> a -> Text
+    pad n v = T.justifyRight n '0' (T.pack (show v))
 
--- | Имя поля в DSL (русские и транслитерированные имена).
+-- | Разбирает дату в формате @ГГГГ-ММ-ДД@ (ровно ASCII-цифры);
+-- @2024-02-30@ и прочие несуществующие даты дают 'Nothing'.
 --
--- Обратная операция к 'fieldByName': принимает любое имя, которое
--- парсер уже 인정ил для данного поля.
-fieldDslName :: Field a -> Text
-fieldDslName = \case
-  Title -> "название"
-  Album -> "альбом"
-  Genre -> "жанр"
-  ExplicitStatus -> "explicit"
-  Year -> "год"
-  Rating -> "оценка"
-  PlayCount -> "прослушиваний"
-  RGTrackGain -> "replaygain"
-  Loved -> "любимое"
-  HasCoverArt -> "обложка"
-  LastPlayed -> "последнее_прослушивание"
-  DateAdded -> "добавлено"
-
--- | Поля, поддерживающие операторы 'Absent'/'Present'
--- (согласно документации Navidrome: теговые и текстовые поля,
--- а также числовые поля ReplayGain).
-fieldPresence :: Field a -> Maybe PresenceField
-fieldPresence = \case
-  Album -> Just PAlbum
-  Genre -> Just PGenre
-  ExplicitStatus -> Just PExplicitStatus
-  RGTrackGain -> Just PRGTrackGain
-  _ -> Nothing
-
--- | Поле, поддерживающее проверку наличия.
-data PresenceField
-  = PAlbum
-  | PGenre
-  | PExplicitStatus
-  | PRGTrackGain
-  deriving (Eq, Show, Enum, Bounded)
-
--- | Имя такого поля в NSP.
-presenceFieldName :: PresenceField -> Text
-presenceFieldName = \case
-  PAlbum -> "album"
-  PGenre -> "genre"
-  PExplicitStatus -> "explicitstatus"
-  PRGTrackGain -> "rgtrackgain"
-
--- | Категория значения поля, поддерживающего проверку наличия.
-presenceValueType :: PresenceField -> ValueType
-presenceValueType = \case
-  PAlbum -> TextType
-  PGenre -> TextType
-  PExplicitStatus -> TextType
-  PRGTrackGain -> NumberType
-
--- | Имя поля, поддерживающего проверку наличия, в DSL.
---
--- Совпадает с 'fieldDslName' соответствующего поля: @альбом@,
--- @жанр@, @explicit@, @replaygain@.
-presenceFieldDslName :: PresenceField -> Text
-presenceFieldDslName = \case
-  PAlbum -> fieldDslName Album
-  PGenre -> fieldDslName Genre
-  PExplicitStatus -> fieldDslName ExplicitStatus
-  PRGTrackGain -> fieldDslName RGTrackGain
-
--- | Имена булевых полей в DSL (запрещены в сортировке).
-boolFieldNames :: [Text]
-boolFieldNames = ["любимое", "обложка"]
+-- Обратная операция к 'formatDay': @parseDay (formatDay d) == Just d@.
+parseDay :: Text -> Maybe Day
+parseDay t = do
+  (yTxt, mTxt, dTxt) <- case T.splitOn "-" t of
+    [ys, ms, ds] | allDigits 4 ys && allDigits 2 ms && allDigits 2 ds ->
+      Just (ys, ms, ds)
+    _ -> Nothing
+  y <- readMaybe (T.unpack yTxt)
+  m <- readMaybe (T.unpack mTxt)
+  d <- readMaybe (T.unpack dTxt)
+  fromGregorianValid y m d
+  where
+    allDigits n s = T.length s == n && T.all isAsciiDigit s
+    isAsciiDigit c = c >= '0' && c <= '9'
 
 ------------------------------------------------------------------------------
 -- Разобранный AST
@@ -371,14 +263,25 @@ data RawCond
   -- ^ Сахар: @любимое@ (равно @любимое = да@).
   | RBin Text RawOp RawValue
   -- ^ @поле оператор значение@
-  | RBetween Text Integer Integer
-  -- ^ @год между 1980 и 1989@
+  | RBetween Text Scientific Scientific
+  -- ^ @replaygain между -8 и -4@
   | RPresence Text PresenceOp
   -- ^ @replaygain отсутствует@
   | RRelative Text Integer
   -- ^ @добавлено за 30 дней@
+  | RNotRelative Text Integer
+  -- ^ @добавлено не за 30 дней@ — «не за N дней» для любого
+  -- датового поля (для поля с возможностью 'CapNotPlayed'
+  -- используется сахар 'RNotPlayed').
   | RNotPlayed Integer
-  -- ^ @не звучало 90 дней@
+  -- ^ @не звучало 90 дней@ — сахар без имени поля: цель берётся
+  -- из реестра по возможности 'CapNotPlayed'.
+  | RDateBetween Text Day Day
+  -- ^ @добавлено между 2024-01-01 и 2024-12-31@ — абсолютный
+  -- диапазон дат (для числовых полей используется 'RBetween').
+  | RPlaylist PlaylistMembership PlaylistRef
+  -- ^ @в подборке id "…"@ / @не в подборке файл "…"@ — членство
+  -- трека в другой подборке (@inPlaylist@/@notInPlaylist@).
   deriving (Eq, Show)
 
 -- | Бинарные операторы DSL.
@@ -386,11 +289,17 @@ data RawOp
   = OpEq
   | OpNe
   | OpGt
+  | OpGe
   | OpLt
+  | OpLe
   | OpContains
   | OpNotContains
   | OpStartsWith
   | OpEndsWith
+  | OpBefore
+  -- ^ @до 2024-06-01@ — только датовые поля.
+  | OpAfter
+  -- ^ @после 2024-06-01@ — только датовые поля.
   deriving (Eq, Show, Enum, Bounded)
 
 -- | Написание оператора в DSL (для сообщений об ошибках).
@@ -399,26 +308,34 @@ rawOpDesc = \case
   OpEq -> "="
   OpNe -> "!="
   OpGt -> ">"
+  OpGe -> ">="
   OpLt -> "<"
+  OpLe -> "<="
   OpContains -> "содержит"
   OpNotContains -> "не содержит"
   OpStartsWith -> "начинается с"
   OpEndsWith -> "заканчивается на"
+  OpBefore -> "до"
+  OpAfter -> "после"
 
 -- | Значение-операнд в условии.
 data RawValue
   = RVText Text
-  | RVNumber Integer
+  | RVNumber Scientific
   | RVBool Bool
+  | RVDate Day
+  -- ^ Абсолютная дата в формате @ГГГГ-ММ-ДД@ (в том числе
+  -- без кавычек — грамматика даты однозначна).
   deriving (Eq, Show)
 
 -- | Отображение значения в сообщениях об ошибках.
 rawValueText :: RawValue -> Text
 rawValueText = \case
   RVText t -> t
-  RVNumber n -> T.pack (show n)
+  RVNumber n -> formatNumber n
   RVBool True -> "да"
   RVBool False -> "нет"
+  RVDate d -> formatDay d
 
 -- | Проверка наличия значения поля.
 data PresenceOp = Absent | Present
@@ -471,32 +388,60 @@ data ValidItem
   deriving (Eq, Show)
 
 -- | Валидированное условие. Конструкторы фиксируют допустимые
--- сочетания «тип поля — оператор — тип значения».
+-- сочетания «тип поля — оператор — тип значения»: поле — ссылка
+-- 'FieldRef' на запись реестра, тип которой задан её видом.
 data ValidCond
-  = VText (Field Text) TextOp Text
+  = VText (FieldRef Text) TextOp Text
   -- ^ Текстовое поле и текстовый операнд.
-  | VNumber (Field Integer) NumOp Integer
-  -- ^ Числовое поле и числовой операнд.
-  | VBetween (Field Integer) Integer Integer
+  | VNumber (FieldRef Scientific) NumOp Scientific
+  -- ^ Числовое поле и числовой операнд (дробные — только у полей с
+  -- 'fieldIsIntegral' = 'False', например ReplayGain).
+  | VBetween (FieldRef Scientific) Scientific Scientific
   -- ^ Числовой диапазон.
-  | VBool (Field Bool) Bool
+  | VBool (FieldRef Bool) Bool
   -- ^ Булево поле и булево значение.
-  | VRelative (Field Day) RelOp Integer
+  | VRelative (FieldRef Day) RelOp Integer
   -- ^ Датовое поле и сравнение в днях.
-  | VPresence PresenceField PresenceOp
-  -- ^ Проверка наличия значения поля.
+  | VDate (FieldRef Day) DateOp Day
+  -- ^ Датовое поле, сравнительный оператор и абсолютная дата.
+  | VDateRange (FieldRef Day) Day Day
+  -- ^ Датовое поле и диапазон абсолютных дат (включительно).
+  | VPresence SomeField PresenceOp
+  -- ^ Проверка наличия значения поля: обычное поле, поддерживающее
+  -- операторы @отсутствует@/@присутствует@ ('fieldPresence').
+  | VPlaylist PlaylistMembership PlaylistRef
+  -- ^ Членство в подборке: ссылка и требуемое направление
+  -- (@inPlaylist@/@notInPlaylist@).
   deriving (Eq, Show)
 
 -- | Текстовые операторы.
 data TextOp = TEq | TNe | TContains | TNotContains | TStartsWith | TEndsWith
   deriving (Eq, Show, Enum, Bounded)
 
--- | Числовые операторы.
-data NumOp = NEq | NNe | NGt | NLt
+-- | Числовые операторы. 'NGe' и 'NLe' (@>=@, @<=@) — «специальные»:
+-- в НСП нет таких операторов, поэтому 'Nspeller.Navidrome' разворачивает
+-- их в эквивалентные выражения (см. 'Nspeller.Navidrome.toNspCond').
+data NumOp = NEq | NNe | NGt | NGe | NLt | NLe
   deriving (Eq, Show, Enum, Bounded)
 
 -- | Относительные сравнения дат.
 data RelOp = InTheLast | NotInTheLast
+  deriving (Eq, Show, Enum, Bounded)
+
+-- | Операторы сравнения датового поля с абсолютной датой.
+--
+-- @DGt@/@DLt@ — строгие (@>@, @<@), @DGe@/@DLe@ — включающие
+-- (@>=@, @<=@), 'DBefore'/'DAfter' — границы Navidrome
+-- (@before@/@after@, строгие же — см. 'Nspeller.Navidrome.toNspCond').
+data DateOp
+  = DEq
+  | DNe
+  | DGt
+  | DGe
+  | DLt
+  | DLe
+  | DBefore
+  | DAfter
   deriving (Eq, Show, Enum, Bounded)
 
 -- | Режим сортировки.
@@ -505,67 +450,16 @@ data SortMode
   | SortBy [SortItem]
   deriving (Eq, Show)
 
--- | Поле сортировки (только не-булевые поля).
-data SortField
-  = SFTitle
-  | SFAlbum
-  | SFGenre
-  | SFYear
-  | SFRating
-  | SFPlayCount
-  | SFLastPlayed
-  | SFDateAdded
-  | SFExplicitStatus
-  | SFReplayGain
-  deriving (Eq, Show, Enum, Bounded)
-
 -- | Направление сортировки.
 data SortDir = SortAsc | SortDesc
   deriving (Eq, Show, Enum, Bounded)
 
--- | Элемент сортировки валидированной подборки.
-data SortItem = SortItem SortField SortDir
+-- | Элемент сортировки валидированной подборки: DSL-имя поля и
+-- направление. Имя канонизировано валидацией
+-- ('Nspeller.Fields.sortFieldByName'): поле обязано иметь признак
+-- сортировки, сравнение и вывод идут по DSL-имени.
+data SortItem = SortItem Text SortDir
   deriving (Eq, Show)
-
--- | Имя поля сортировки в NSP.
-sortFieldName :: SortField -> Text
-sortFieldName = \case
-  SFTitle -> "title"
-  SFAlbum -> "album"
-  SFGenre -> "genre"
-  SFYear -> "year"
-  SFRating -> "rating"
-  SFPlayCount -> "playcount"
-  SFLastPlayed -> "lastplayed"
-  SFDateAdded -> "dateadded"
-  SFExplicitStatus -> "explicitstatus"
-  SFReplayGain -> "rgtrackgain"
-
--- | Имя поля из DSL → поле сортировки.
---
--- Булевые поля сюда намеренно не входят: Navidrome не позволяет
--- сортировать по ним, а валидация даёт отдельное сообщение.
-sortFieldByName :: Text -> Maybe SortField
-sortFieldByName name =
-  case find (\sf -> name == sortFieldName sf || name == sortFieldDslName sf) candidates of
-    Just sf -> Just sf
-    Nothing -> Nothing
-  where
-    candidates = [minBound .. maxBound] :: [SortField]
-
--- | Имя поля сортировки в DSL.
-sortFieldDslName :: SortField -> Text
-sortFieldDslName = \case
-  SFTitle -> "название"
-  SFAlbum -> "альбом"
-  SFGenre -> "жанр"
-  SFYear -> "год"
-  SFRating -> "оценка"
-  SFPlayCount -> "прослушиваний"
-  SFLastPlayed -> "последнее_прослушивание"
-  SFDateAdded -> "добавлено"
-  SFExplicitStatus -> "explicit"
-  SFReplayGain -> "replaygain"
 
 ------------------------------------------------------------------------------
 -- Ошибки компиляции
