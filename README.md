@@ -1,3 +1,5 @@
+English | [Русский](README.ru.md)
+
 # Muzlovar
 
 [![CI](https://github.com/zamyatinmn/muzlovar/actions/workflows/ci.yml/badge.svg)](https://github.com/zamyatinmn/muzlovar/actions/workflows/ci.yml)
@@ -7,6 +9,8 @@
 Muzlovar lets you build complex [Navidrome smart playlists](https://www.navidrome.org/docs/usage/features/smart-playlists/) without writing `.nsp` JSON by hand. Arrange typed rules in a browser, preview the generated `.mix` and `.nsp`, validate the result, and publish it to Navidrome's playlist directory.
 
 The browser edits a DTO; it does not contain a second playlist compiler. Muzlovar's server and the bundled **Nspeller** CLI both use the same Haskell field registry, typed AST, validation rules, renderer, and Navidrome model.
+
+**Language:** The Muzlovar web UI currently uses Russian, and the Nspeller playlist DSL uses Russian syntax. English UI localization is not implemented yet; the screenshot below shows the current interface.
 
 ## Highlights
 
@@ -24,7 +28,7 @@ The browser edits a DTO; it does not contain a second playlist compiler. Muzlova
 
 ## Quick start with Docker
 
-The release image is published as [`ghcr.io/zamyatinmn/muzlovar`](https://github.com/zamyatinmn/muzlovar/pkgs/container/muzlovar). No Haskell toolchain is required.
+After the first release tag, ready-to-run images will be available as [`ghcr.io/zamyatinmn/muzlovar`](https://github.com/zamyatinmn/muzlovar/pkgs/container/muzlovar). No Haskell toolchain is required to run them.
 
 Pull it directly:
 
@@ -40,7 +44,7 @@ cd muzlovar
 docker compose up -d
 ```
 
-Open <http://localhost:8765>. The default Compose file pulls `ghcr.io/zamyatinmn/muzlovar:latest` and uses Docker-managed volumes, so it works on a fresh clone without GHC, Cabal, host-directory preparation, or local image builds.
+Open <http://localhost:8765>. The default Compose file pulls `ghcr.io/zamyatinmn/muzlovar:latest` and uses Docker-managed volumes, so after the first image release it works on a fresh clone without GHC, Cabal, host-directory preparation, or local image builds.
 
 Authentication is disabled in the zero-config setup. Keep the service on a trusted network, or create a `.env` from [`.env.example`](.env.example) and set both `MUZLOVAR_USERNAME` and `MUZLOVAR_PASSWORD` before exposing it through a reverse proxy.
 
