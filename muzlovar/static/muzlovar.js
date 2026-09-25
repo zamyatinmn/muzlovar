@@ -1,7 +1,7 @@
 /* Muzlovar — визуальный редактор умных подборок Navidrome.
  *
- * Раскладка desktop: шапка (логотип, навигация, доступность сервера,
- * «Опубликовать») и три колонки на всю высоту — ингредиенты (~22%),
+ * Раскладка desktop: шапка (логотип, навигация, «Опубликовать»)
+ * и три колонки на всю высоту — ингредиенты (~22%),
  * рецепт подборки (~50%) и предпросмотр (~28%).
  *
  * Два принципа:
@@ -43,8 +43,7 @@
       'e-mix', 'e-nsp', 'toasts',
       'e-search', 'e-rules', 'e-validity', 'e-validity-text',
       'e-path', 'e-copy-mix', 'e-copy-preview', 'e-copy-nsp',
-      'pl-title', 'pl-meta', 'tab-rules', 'tab-mix',
-      'conn-status', 'conn-text'
+      'pl-title', 'pl-meta', 'tab-rules', 'tab-mix'
     ].forEach(function (id) { els[id] = document.getElementById(id); });
   }
 
@@ -151,7 +150,6 @@
   /* ------------------------------------------------------------------ */
 
   function initChrome() {
-    initConnStatus();
     initTabs();
     bindCopy('e-copy-mix', function () { return els['e-mix'] ? els['e-mix'].value : ''; });
     bindCopy('e-copy-preview', function () {
@@ -162,35 +160,9 @@
     });
   }
 
-  /* Доступность сервера: опрашивает публичный /health.
-   *
-   * Разбор: /health — это эндпоинт самого Muzlovar, он всегда
-   * отвечает 200 и НЕ проверяет Navidrome/Subsonic (см. routes в
-   * Server.hs). Бейдж поэтому называет сервер редактора: внутренний
-   * термин «Прод» и намёк на Navidrome тут были бы неверны. */
-  function initConnStatus() {
-    var box = els['conn-status'];
-    if (!box) return;
-
-    function setConn(ok) {
-      box.className = 'conn ' + (ok ? 'ok' : 'down');
-      if (els['conn-text']) {
-        els['conn-text'].textContent = ok ? 'Muzlovar доступен' : 'Muzlovar недоступен';
-      }
-      box.title = ok
-        ? 'Сервер Muzlovar отвечает на /health — проверка каждые 30 с'
-        : 'Сервер Muzlovar не отвечает — обновите страницу позже';
-    }
-
-    function ping() {
-      fetch('/health', { headers: { 'Accept': 'application/json' } })
-        .then(function (r) { setConn(r.ok); })
-        .catch(function () { setConn(false); });
-    }
-
-    ping();
-    setInterval(ping, 30000);
-  }
+  /* Бейдж доступности сервера удалён из шапки: /health остаётся
+   * публичным эндпоинтом, но интерфейс его не опрашивает — статус
+   * сервера виден и так (страница либо загрузилась, либо нет). */
 
   function initTabs() {
     document.querySelectorAll('.tab[data-tab]').forEach(function (btn) {

@@ -1,7 +1,7 @@
 /* Muzlovar — тёмная графитовая тема, спокойная продуктовая плотность.
  *
- * Каркас: шапка (логотип, навигация разделов, статус сервера,
- * «Опубликовать») и три колонки на всю высоту окна:
+ * Каркас: шапка (логотип, навигация разделов, «Опубликовать»)
+ * и три колонки на всю высоту окна:
  * ингредиенты ~22% · рецепт ~50% · предпросмотр ~28%.
  *
  * Принципы визуала:
@@ -220,6 +220,10 @@ header.app {
   flex-wrap: wrap;
   gap: 4px;
 }
+/* Неактивные пункты — обычные ссылки, а не «задизейбленные»: текст
+ * светлее приглушённого, hover подсвечивает акцентом. Активный
+ * раздел (класс active + aria-current от серверной разметки)
+ * выделяется фоном, рамкой и жирным — как раньше. */
 .app-nav-link {
   flex: 0 0 auto;
   display: inline-flex;
@@ -227,13 +231,13 @@ header.app {
   height: 32px;
   padding: 0 12px;
   font-size: 13.5px;
-  color: var(--fg-dim);
+  color: var(--fg);
   text-decoration: none;
   border: 1px solid transparent;
   border-radius: 999px;
   white-space: nowrap;
 }
-.app-nav-link:hover { color: var(--fg); background: var(--bg-hover); }
+.app-nav-link:hover { color: var(--accent); background: var(--bg-hover); }
 .app-nav-link.active {
   color: var(--fg);
   font-weight: 600;
@@ -250,25 +254,6 @@ header.app {
 }
 /* Элементы шапки не сжимаются текстом вдвое — им лучше перенестись. */
 .header-actions > * { flex: 0 0 auto; }
-
-.conn {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  height: 32px;
-  padding: 0 12px;
-  font-size: 13px;
-  color: var(--fg-dim);
-  background: var(--bg-raised);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  white-space: nowrap;
-}
-.conn-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg-faint); flex: 0 0 auto; }
-.conn.ok { color: var(--ok-text); border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); }
-.conn.ok .conn-dot { background: var(--ok); }
-.conn.down { color: var(--danger-text); border-color: color-mix(in srgb, var(--danger) 45%, var(--line)); }
-.conn.down .conn-dot { background: var(--danger); }
 
 /* Узкое окно: подзаголовок уходит первым (он и так с ellipsis),
  * логотип больше не сжимается, а шапка складывается строками. */
@@ -297,6 +282,18 @@ main {
 }
 /* Редактор: колонки занимают всю высоту окна, скролл — внутри колонок. */
 main.main-full { max-width: none; padding: 14px; display: flex; overflow: hidden; }
+
+/* Большие экраны: список подборок занимает доступную ширину —
+ * колонке «Дерево условий» тесно в прежних 1360px. До 1440px
+ * контейнер и таблица не меняются, поэтому раскладки 900px и 700px
+ * (см. @media ниже) остаются как были; у редактора main.main-full
+ * своё правило с более высоким специфитетом, его не трогаем. */
+@media (min-width: 1440px) {
+  main { max-width: 1800px; }
+  /* Специфитет выше, чем у базового правила table.list .summary
+   * (оно объявлено ниже по файлу и иначе перебило бы override). */
+  main table.list .summary { max-width: 64ch; }
+}
 
 .workspace {
   flex: 1 1 auto;

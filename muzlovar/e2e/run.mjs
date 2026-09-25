@@ -2,7 +2,7 @@
 // непосредственно в дерево правил (и перенос уже существующих условий),
 // плюс layout-проверки: палитра ингредиентов, сетка таблицы подборок,
 // footer, header/навигация и ограничения поля «год»
-// (сценарии 12–20, свой url/viewport).
+// (сценарии 12–21, свой url/viewport).
 //
 // Запуск:  node run.mjs      (или npm test)
 // Переменные:
@@ -998,6 +998,25 @@ const pageLayoutScenarios = [
     fn: async (page) => {
       const g = await tableGrid(page);
       assertTableGrid(g, "широкий экран");
+      // Над таблицей только заголовок: «Корзина» и «Новая подборка»
+      // дублировали навигацию шапки и убраны.
+      const tb = await page.evaluate(() => {
+        const t = document.querySelector(".toolbar");
+        if (!t) return null;
+        return {
+          text: t.textContent.trim(),
+          controls: t.querySelectorAll("a, button").length,
+          summaryMax: getComputedStyle(
+            document.querySelector("table.list .summary"),
+          ).maxWidth,
+        };
+      });
+      assert(tb, "на главной нет .toolbar");
+      assert(
+        tb.controls === 0,
+        "над таблицей остались кнопки/ссылки: " + JSON.stringify(tb),
+      );
+      assert(tb.text === "Умные подборки", "заголовок.toolbar: " + JSON.stringify(tb));
       const info = await page.evaluate(() => {
         const foot = document.querySelector("footer.app");
         const rows = [...document.querySelectorAll("table.list tbody tr")];
@@ -1019,6 +1038,22 @@ const pageLayoutScenarios = [
       assert(
         info.footBottom <= info.vh + 1,
         "footer ниже окна: " + info.footBottom + " > " + info.vh,
+      );
+      // Большие экраны: контейнер списка шире прежних 1360px, колонка
+      // «Дерево условий» получает больше места, а сетка таблицы от
+      // этого не ломается и документ не едет по горизонтали.
+      await page.setViewportSize({ width: 1920, height: 900 });
+      const wideGrid = await tableGrid(page);
+      assertTableGrid(wideGrid, "очень широкий экран");
+      const wide = await page.evaluate(() => ({
+        mainW: document.querySelector("main").getBoundingClientRect().width,
+        summaryMax: getComputedStyle(document.querySelector("table.list .summary")).maxWidth,
+      }));
+      assert(wide.mainW > 1360, "контейнер списка не расширился: " + wide.mainW);
+      assert(
+        parseFloat(wide.summaryMax) > parseFloat(tb.summaryMax),
+        "колонка «Дерево условий» не стала шире: " +
+          tb.summaryMax + " → " + wide.summaryMax,
       );
     },
   },
@@ -1107,10 +1142,11 @@ const pageLayoutScenarios = [
 ];
 
 // Header, навигация и ограничения поля «год»: активный раздел на
-// index/edit/new/trash, отсутствие шестерёнки/«Настройки» и кнопки
-// «Проверить», узкий экран без горизонтального скролла документа,
-// min/step года в /api/schema и в input редактора, серверная
-// валидация граничных значений (−1 и 0).
+// index/edit/new/trash, отсутствие шестерёнки/«Настройки», кнопки
+// «Проверить» и бейджа доступности, узкий экран без горизонтального
+// скролла документа, min/step года в /api/schema и в input редактора,
+// серверная валидация граничных значений (−1 и 0) и регрессия
+// «Год > 2010» + «Год < 2020» в одной группе ВСЕ (сценарии 17–21).
 const headerScenarios = [
   {
     name: "17. header: активный раздел навигации на всех страницах",
@@ -1170,15 +1206,20 @@ const headerScenarios = [
       await page.goto(origin + "/trash", { waitUntil: "networkidle" });
       await checkNav("/trash", "trash");
 
-      // Бейдж доступности: опрашивает /health самого Muzlovar
-      // (внутренних терминов и намёков на Navidrome в нём нет).
-      await page.waitForFunction(
-        () => (document.getElementById("conn-text") || {}).textContent === "Muzlovar доступен",
-        null,
-        { timeout: 10000 },
+      // Индикатор доступности удалён из шапки: /health остаётся
+      // серверным эндпоинтом (им пользуется сам run.mjs), но бейджа
+      // «Muzlovar доступен/недоступен» и опроса в UI больше нет.
+      const conn = await page.evaluate(() => ({
+        status: !!document.getElementById("conn-status"),
+        text: !!document.getElementById("conn-text"),
+        badge: document.body.textContent.includes("Muzlovar доступен") ||
+          document.body.textContent.includes("Muzlovar недоступен") ||
+          document.body.textContent.includes("Проверка…"),
+      }));
+      assert(
+        !conn.status && !conn.text && !conn.badge,
+        "индикатор доступности остался в DOM: " + JSON.stringify(conn),
       );
-      const title = await page.$eval("#conn-status", (e) => e.getAttribute("title") || "");
-      assert(title.includes("Muzlovar") && title.includes("/health"), "заголовок статуса: " + title);
     },
   },
   {
@@ -1288,6 +1329,157 @@ const headerScenarios = [
         "год=0: статус " + ok.status + ", ожидался 200: " + JSON.stringify(ok.body),
       );
       assert(ok.body && ok.body.ok === true, "год=0: ok !== true: " + JSON.stringify(ok.body));
+    },
+  },
+  {
+    // Регрессия: «Год > 2010» и «Год < 2020» живут в одной группе
+    // ВСЕ как два независимых условия — со своими id, своими
+    // операторами и значениями в дереве и в read-only представлении;
+    // сервер собирает оба в .mix и .nsp, валидация без ошибок.
+    name: "21. регрессия: Год > 2010 и Год < 2020 в одной группе ВСЕ",
+    fn: async (page) => {
+      // Подписи поля и операторов берём из /api/schema — фронтенд
+      // не хранит собственных списков, тест не должен дублировать их.
+      const meta = await page.evaluate(async () => {
+        const res = await fetch("/api/schema");
+        const d = await res.json();
+        const f = d.fields.find((x) => x.id === "год");
+        const ops = {};
+        (d.operators || []).forEach((o) => { ops[o.id] = o.name; });
+        return {
+          dsl: f ? f.id : "год",
+          title: f ? f.title : "Год",
+          gt: ops.gt || ">",
+          lt: ops.lt || "<",
+        };
+      });
+
+      // В сиде корень — группа ВСЕ с «год < 2010» (узел 2) и
+      // «год < 2020» (узел 4). Меняем оператор первого на «>» и
+      // возвращаем ему 2010: смена оператора сбрасывает значение на
+      // 0 — это поведение редактора, значение вводится заново.
+      const kinds0 = await groupKinds(page, "#e-tree .group-root");
+      assert(
+        JSON.stringify(kinds0) === JSON.stringify(["all"]),
+        "корневая группа не ВСЕ: " + JSON.stringify(kinds0),
+      );
+
+      // Убираем попутный конфликт с вложенной группой: в сиде
+      // «любое» содержит «год < 1990», который с корневым
+      // «год > 2010» даёт доказуемо невыполнимую ветвь миров
+      // [год>2010, год<1990] — валидатор честно вернёт ошибку
+      // (тот же приём закреплён тестом nestedConflictSrc в
+      // UnitTests). Регрессия проверяет пару условий корня, поэтому
+      // лишнее условие удаляем, а вложенную группу оставляем.
+      const nestedSecond = sel.nestedChildren + ":nth-child(2)";
+      const nestedField = await page.$eval(
+        nestedSecond + " select.field-sel",
+        (s) => s.value,
+      );
+      assert(
+        nestedField === "год",
+        "вложенный узел 2 не «год»: " + nestedField,
+      );
+      await page.click(nestedSecond + ' button[aria-label="Удалить условие"]');
+
+      const second = sel.children + ":nth-child(2)";
+      await page.selectOption(second + ' select[aria-label="Оператор"]', "gt");
+      await page.fill(second + ' input[aria-label="Числовое значение"]', "2010");
+
+      // Дерево: оба условия на месте и независимы.
+      const shape = await rootShape(page);
+      assert(
+        JSON.stringify(shape) ===
+          JSON.stringify([
+            "cond:любимое:bare",
+            "cond:год:gt",
+            "group",
+            "cond:год:lt",
+          ]),
+        "корень не сохранил оба условия: " + JSON.stringify(shape),
+      );
+      const ids = await childIds(page, sel.children);
+      assert(new Set(ids).size === ids.length, "дубликаты id в корне: " + ids);
+      const values = await page.$$eval(sel.children, (els) =>
+        els.map((li) => {
+          const i = li.querySelector('input[aria-label="Числовое значение"]');
+          return i ? i.value : null;
+        }),
+      );
+      assert(
+        values[1] === "2010",
+        "значение «больше» не 2010: " + JSON.stringify(values),
+      );
+      assert(
+        values[3] === "2020",
+        "значение соседнего условия изменилось: " + JSON.stringify(values),
+      );
+
+      // Read-only дерево (#e-rules): обе строки лежат непосредственно
+      // в корневом списке группы ВСЕ, а не во вложенной.
+      const rootRows = await page.$$eval(
+        "#e-rules > .vgroup > .vlist > .vcond",
+        (rows) =>
+          rows.map((r) => ({
+            field: (r.querySelector(".vfield") || {}).textContent || "",
+            op: (r.querySelector(".vop") || {}).textContent || "",
+            val: (r.querySelector(".vval") || {}).textContent || "",
+          })),
+      );
+      const has = (op, val) =>
+        rootRows.some(
+          (r) => r.field === meta.title && r.op === op && r.val === val,
+        );
+      assert(
+        has(meta.gt, "2010"),
+        "в модели нет «" + meta.title + " " + meta.gt + " 2010»: " + JSON.stringify(rootRows),
+      );
+      assert(
+        has(meta.lt, "2020"),
+        "в модели нет «" + meta.title + " " + meta.lt + " 2020»: " + JSON.stringify(rootRows),
+      );
+      const kinds1 = await groupKinds(page, "#e-rules .vgroup");
+      assert(kinds1[0] === "all", "корень в модели не ВСЕ: " + JSON.stringify(kinds1));
+
+      // Компиляция: предпросмотр .mix собирает оба условия (сервер
+      // рендерит его ответом /api/validate), порядок как в дереве.
+      const markerGt = meta.dsl + " " + meta.gt + " 2010";
+      const markerLt = meta.dsl + " " + meta.lt + " 2020";
+      let mix = await waitMixIncludes(page, markerGt);
+      mix = await waitMixIncludes(page, markerLt);
+      assert(
+        mix.indexOf("где все") >= 0 && mix.indexOf(markerGt) > mix.indexOf("где все"),
+        "«" + markerGt + "» не в корневой группе .mix: " + mix,
+      );
+      assert(
+        mix.indexOf(markerGt) < mix.indexOf(markerLt),
+        "условия не в порядке дерева в .mix: " + mix,
+      );
+
+      // Итог проверки — без ошибок (допустимы предупреждения), и .nsp
+      // собирает оба значения в том же порядке.
+      await page.waitForFunction(
+        () => {
+          const c = (document.getElementById("e-validity") || {}).className || "";
+          return c.includes("ok") || c.includes("warn");
+        },
+        null,
+        { timeout: 10000 },
+      );
+      mix = await mixText(page);
+      assert(
+        mix.indexOf(markerGt) >= 0 && mix.indexOf(markerLt) >= 0,
+        "предпросмотр разошёлся с валидацией: " + mix,
+      );
+      const nsp = await page.$eval("#e-preview-nsp", (e) => e.textContent || "");
+      assert(
+        nsp.includes("2010") && nsp.includes("2020"),
+        ".nsp собран не с обоими годами: " + nsp.slice(0, 300),
+      );
+      assert(
+        nsp.indexOf("2010") < nsp.indexOf("2020"),
+        "порядок года в .nsp нарушен: " + nsp.slice(0, 300),
+      );
     },
   },
 ];

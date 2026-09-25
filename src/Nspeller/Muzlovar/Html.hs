@@ -128,21 +128,12 @@ layoutWith mSection title mHeaderActions mainContent =
       where
         active = mSection == Just sec
 
+    -- Индикатор доступности сервера удалён: /health остаётся
+    -- публичным эндпоинтом сервера (его используют обвязка и
+    -- внешние проверки), но бейдж в шапке и опрос каждые 30 с
+    -- пользователю не нужны.
     headerActions =
-      div_ [class_ "header-actions"] (connStatus <> fromMaybe mempty mHeaderActions)
-
-    -- Индикатор доступности сервера: опрашивает публичный /health.
-    -- /health отвечает 200 самим Muzlovar (без проверки Navidrome),
-    -- поэтому подпись говорит о сервере редактора, а не о Subsonic.
-    connStatus =
-      span_
-        [ id_ "conn-status"
-        , class_ "conn"
-        , makeAttribute "title" "Доступность сервера Muzlovar (опрос /health)"
-        ]
-        ( span_ [class_ "conn-dot"] ""
-            <> span_ [id_ "conn-text"] "Проверка…"
-        )
+      div_ [class_ "header-actions"] (fromMaybe mempty mHeaderActions)
 
     footerEl =
       if editorMode
@@ -230,6 +221,10 @@ summaryEl = term "summary"
 ------------------------------------------------------------------------------
 
 -- | Главная страница: таблица всех @.mix@ и @.nsp@.
+--
+-- Над таблицей только заголовок: кнопки «Корзина» и «Новая
+-- подборка» дублировали одноимённые пункты навигации в шапке и
+-- убраны вместе с ними.
 indexPage :: [PlaylistEntry] -> Html ()
 indexPage entries =
   layoutWith (Just NavPlaylists)
@@ -237,11 +232,7 @@ indexPage entries =
     Nothing
     ( div_
         [class_ "toolbar"]
-        ( h2_ "Умные подборки"
-            <> spacer_
-            <> a_ [href_ "/trash", class_ "btn"] "Корзина"
-            <> a_ [href_ "/new", class_ "btn primary"] "Новая подборка"
-        )
+        (h2_ "Умные подборки")
         <> if null entries
           then
             div_
