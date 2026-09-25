@@ -1,0 +1,4 @@
+services:
+  muzlovar:
+    build: .
+    image: muzlovar:local

@@ -12,7 +12,15 @@ author:             nspeller contributors
 maintainer:         nspeller contributors
 category:           Music
 build-type:         Simple
-extra-doc-files:    README.md
+extra-doc-files:
+    README.md
+    CONTRIBUTING.md
+    SECURITY.md
+    docs/nspeller-reference.ru.md
+
+source-repository head
+  type:             git
+  location:         https://github.com/zamyatinmn/muzlovar.git
 
 common warnings
   ghc-options:

@@ -1,6 +1,8 @@
 thundercloud
 dist-newstyle/
 muzlovar/e2e/node_modules/
+.idea/
+.env
 cabal.project.local
 .ghc.environment.*
 *.hi
@@ -8,6 +10,8 @@ cabal.project.local
 *.exe
 *.tmp
 
-# Локальные данные dev-сервера Muzlovar (дефолтный стор ./rules, ./playlists)
+# Local Muzlovar stores (default development paths).
+data/
 rules/
 playlists/
+trash/

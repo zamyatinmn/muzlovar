@@ -1,8 +1,15 @@
 .git
+.github
 .gitignore
+.idea
+.env
 dist-newstyle
 thundercloud
 data
+rules
+playlists
+trash
+muzlovar/e2e/node_modules
 Dockerfile
 docker-compose.yaml
 .dockerignore

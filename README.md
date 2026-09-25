@@ -1,662 +1,141 @@
-# nspeller
+# Muzlovar
 
-`nspeller` — небольшой CLI-инструмент, который компилирует человекочитаемые
-правила умных музыкальных подборок из файлов `.mix` в JSON-файлы `.nsp`,
-понимаемые [Navidrome Smart Playlists](https://www.navidrome.org/docs/usage/features/smart-playlists/).
+[![CI](https://github.com/zamyatinmn/muzlovar/actions/workflows/ci.yml/badge.svg)](https://github.com/zamyatinmn/muzlovar/actions/workflows/ci.yml)
 
-В том же репозитории собирается второй executable — **Muzlovar**,
-серверный визуальный редактор и менеджер умных подборок поверх того же
-ядра (см. раздел [Muzlovar](#muzlovar-веб-редактор)). Второго
-компилятора нет: редактор отдаёт DTO, а `.mix`/`.nsp` генерирует
-тот же конвейер, что и CLI.
+**A self-hosted visual smart-playlist editor for Navidrome.**
 
-Пайплайн выстроен по-хаскелевски:
+Muzlovar lets you build complex [Navidrome smart playlists](https://www.navidrome.org/docs/usage/features/smart-playlists/) without writing `.nsp` JSON by hand. Arrange typed rules in a browser, preview the generated `.mix` and `.nsp`, validate the result, and publish it to Navidrome's playlist directory.
 
-```text
-Text → Parsed AST → Validated AST → Navidrome NSP model → JSON
-```
+The browser edits a DTO; it does not contain a second playlist compiler. Muzlovar's server and the bundled **Nspeller** CLI both use the same Haskell field registry, typed AST, validation rules, renderer, and Navidrome model.
 
-* парсер (`megaparsec`) только разбирает текст и запоминает позиции —
-  он не генерирует JSON;
-* валидация проверяет типы полей и операторов, значения, обязательные
-  секции и собирает **все** ошибки файла, а не только первую;
-* типобезопасность — ссылка `FieldRef a`, индексированная видом поля
-  из реестра: некорректное сочетание «поле/оператор» невозможно даже
-  написать в валидированном AST;
-* на выходе — pretty-print JSON с отступом в два пробела,
-  детерминированным порядком ключей и завершающим переводом строки.
+## Highlights
 
-## Требования
+- Visual rule builder with nested **ALL/ANY** groups, palette search, keyboard-friendly controls, and pointer-based drag and drop.
+- Live canonical `.mix` and `.nsp` previews backed by server-side validation.
+- Rules for metadata, listening history, ratings, favourites, album and artist statistics, audio properties, identifiers, and playlist references.
+- Safe publishing with collision handling, atomic file replacement, persisted ownership checks, and rollback on write failure.
+- Rename, save-as-new, recoverable trash, restore, and permanent deletion workflows.
+- Existing NSP files with unsupported nodes remain visible but are treated as read-only external playlists.
+- Optional Basic Auth and optional Subsonic integration for looking up and deleting the matching Navidrome playlist entity.
+- Multi-stage Docker image, a small non-root runtime, Haskell unit/golden/property/integration tests, and browser E2E tests.
+- Nspeller CLI for checking one `.mix`, compiling one file, or validating and compiling a directory as a batch.
 
-* GHC ≥ 9.6 (проверено на GHC 9.10.3);
-* `cabal-install` ≥ 3.10;
-* доступ к Hackage при первой сборке.
+![Muzlovar visual smart-playlist editor](docs/images/muzlovar-editor.png)
 
-## Сборка
+## Quick start with Docker
+
+The release image is published as [`ghcr.io/zamyatinmn/muzlovar`](https://github.com/zamyatinmn/muzlovar/pkgs/container/muzlovar). No Haskell toolchain is required.
+
+Pull it directly:
 
 ```bash
-cabal build
+docker pull ghcr.io/zamyatinmn/muzlovar:latest
 ```
 
-Бинарники после сборки:
+Or clone the repository for the ready-to-use Compose configuration:
 
 ```bash
-cabal list-bin exe:nspeller
-cabal list-bin exe:muzlovar
-```
-
-Можно установить CLI в пользовательский каталог:
-
-```bash
-cabal install exe:nspeller --installdir="$HOME/.local/bin"
-```
-
-## Тесты
-
-```bash
-cabal test
-```
-
-Набор включает несколько видов тестов:
-
-* **unit** — каждое поле, каждый оператор, вложенные группы, сахар,
-  ошибки типов, сортировка, необязательные метаданные, точный формат
-  сообщений об ошибках;
-* **golden** — пять полных сценариев `.mix → .nsp`
-  (`test/golden/`), сравнение байт-в-байт закрепляет форматирование
-  и стабильность сериализации;
-* **property-based** (QuickCheck) — декодируемость JSON, совместимость
-  операторов с типами полей, положительность `limit`, каноничность
-  pretty-print, известность полей сортировки;
-* **DTO и round-trip** — DTO ↔ AST ↔ `.mix`/`.nsp` во обе стороны,
-  обратимость рендера `parse (render ast) == ast` (в том числе на
-  сгенерированных QuickCheck подборках);
-* **schema** — `/api/schema` согласован с валидацией ядра: каждая
-  пара «поле × оператор» из схемы компилируется ровно тогда, когда
-  её принимает ядро;
-* **store** — атомарная публикация и rollback, конфликты без
-  `overwrite`, безопасность slug, path traversal и симлинки,
-  жизненный цикл корзины, статусы managed/external/broken;
-* **server** (интеграционные, через `wai-extra`) — Basic Auth
-  (постоянное по времени сравнение), публичные `/health` и
-  `/static`, жизненный цикл подборки POST → GET → DELETE → корзина,
-  external read-only, структурированные ошибки API.
-
-### E2E: drag & drop в дереве правил
-
-Headless-сценарии перетаскивания ингредиентов из палитры прямо в
-дерево (Playwright + Chromium, сервер поднимается на свободном порту
-со временным стором, диск не затрагивается):
-
-```bash
-cd muzlovar/e2e
-npm install
-npm test
-```
-
-Одиннадцать сценариев: drop в начало/между/в конец, во вложенную
-группу, два одинаковых поля, перестановка и перенос существующих
-условий, несколько перетаскиваний подряд, клик по палитре после DnD,
-отсутствие лишних DOM-элементов и соответствие порядка
-«DOM = модель = .mix». Переменные: `MUZLOVAR_E2E_SKIP_BUILD=1` (не
-пересобирать exe), `MUZLOVAR_E2E_CHROME=<путь>` (свой Chromium).
-
-## Команды CLI
-
-### Проверка одного файла
-
-```bash
-nspeller check forgotten.mix
-```
-
-Успех:
-
-```text
-OK: forgotten.mix
-```
-
-Ошибка (код возврата — ненулевой):
-
-```text
-broken.mix:5:3
-
-  оценка содержит "rock"
-  ^^^^^^^^^^^^^^^^^^^^^^
-
-Оператор «содержит» применим только к текстовым полям.
-Поле «оценка» имеет числовой тип.
-```
-
-### Компиляция одного файла
-
-```bash
-nspeller build forgotten.mix
-```
-
-Создаёт рядом `forgotten.nsp`. Явный путь:
-
-```bash
-nspeller build forgotten.mix --output /path/to/forgotten.nsp
-```
-
-### Компиляция каталога
-
-```bash
-nspeller build-all ./rules --output ./playlists
-```
-
-Поведение:
-
-* обрабатываются только файлы `*.mix` **непосредственно** в каталоге
-  (рекурсивного обхода нет); по умолчанию `--output` совпадает с
-  входным каталогом;
-* сначала проверяются **все** исходники; если хотя бы один невалиден —
-  выводятся все ошибки и **ни один** выходной файл не изменяется;
-* при успехе каждый `foo.mix` атомарно записывается в `foo.nsp`
-  (временный файл `foo.nsp.tmp` в том же каталоге + `rename`);
-* старые `.nsp`, для которых больше нет парного `.mix`, **не удаляются**;
-* файлы читаются строго как UTF-8.
-
-## Muzlovar (веб-редактор)
-
-`muzlovar` — серверный визуальный редактор и менеджер умных подборок:
-просмотр, редактирование, публикация и удаление `.nsp` поверх того же
-ядра Nspeller. Стек: Scotty, Lucid (HTML рендерится на сервере),
-vanilla JS — без npm и без дублирования компилятора на
-JavaScript: браузер редактирует DTO, а `.mix`/`.nsp` генерирует
-сервер. Drag & drop дерева правил — собственный: перенос идёт на
-pointer events, во время drag DOM дерева не меняется (призрак узла +
-индикатор точки вставки), а модель обновляется по стабильным id.
-
-Запуск (без авторизации — для локальной разработки):
-
-```bash
-cabal run exe:muzlovar
-```
-
-С авторизацией:
-
-```bash
-export MUZLOVAR_USERNAME=admin
-export MUZLOVAR_PASSWORD=secret
-cabal run exe:muzlovar
-```
-
-Приложение откроется на `http://127.0.0.1:8765/`.
-
-### Экраны
-
-* **список** — все `.mix`/`.nsp`: название, описание, файлы,
-  публичность, лимит, сортировка, краткое дерево условий, статус
-  (managed/external/broken, флаги «нет .mix» и «не опубликована»)
-  и дата изменения;
-* **конструктор** — три колонки на всю высоту: ингредиенты
-  (группы «Логика», «История», «Метаданные», «Аудио», «Файлы»,
-  «Альбом», «Артист», «Идентификаторы», «Ссылки», поиск, drag & drop),
-  рецепт подборки (название, описание, дерево условий с группами
-  ВСЕ/ЛЮБОЕ, drop zone, порядок и лимит) и предпросмотр (дерево
-  условия, канонический `.mix` и `.nsp` — вкладки обновляются
-  автоматически при каждом изменении рецепта, — файлы на диске,
-  путь публикации, статус проверки, карточка подборки и удаление
-  из прода);
-  кнопки-альтернативы для клавиатуры сохранены;
-* **корзина** — восстановление и окончательное удаление.
-
-Внешние подборки (созданные не редактором) открываются только на
-чтение. Удаление требует ввода точного названия, переносит файлы в
-корзину (восстановимо) и **не изменяет** базу данных Navidrome
-напрямую: при настроенном Subsonic сущность удаляется через
-`deletePlaylist`, иначе её нужно удалить вручную в UI Navidrome.
-
-### Переменные окружения
-
-| Переменная | По умолчанию | Назначение |
-| --- | --- | --- |
-| `MUZLOVAR_USERNAME` | — | **необязательна**: логин Basic Auth (включается только вместе с `MUZLOVAR_PASSWORD`) |
-| `MUZLOVAR_PASSWORD` | — | **необязательна**: пароль Basic Auth (обе не заданы — авторизация выключена, задана только одна — ошибка запуска) |
-| `MUZLOVAR_RULES_DIR` | `./rules` | каталог исходников `.mix` |
-| `MUZLOVAR_PLAYLISTS_DIR` | `./playlists` | каталог публикуемых `.nsp` (обычно `PlaylistsPath` Navidrome) |
-| `MUZLOVAR_TRASH_DIR` | `./trash` | корзина удалённых подборок |
-| `MUZLOVAR_PORT` | `8765` | порт (1–65535) |
-| `MUZLOVAR_HOST` | `*` | адрес привязки |
-| `MUZLOVAR_SUBSONIC_URL` | — | необязательный URL Subsonic API |
-| `MUZLOVAR_SUBSONIC_USER` | — | пользователь Subsonic |
-| `MUZLOVAR_SUBSONIC_PASSWORD` | — | пароль Subsonic |
-
-Авторизация опциональна: обе учётные переменные заданы — включается
-Basic Auth (сравнение пароля за постоянное время; публичны только
-`GET /health` и файлы `/static`, всё остальное закрыто авторизацией);
-обе не заданы — сервис работает без авторизации (только для закрытой
-внутренней сети); задана только одна — приложение не стартует.
-
-### HTTP API
-
-* `GET /api/schema` — единая схема полей и операторов (источник —
-  Haskell-модель, собственных копий списков в JavaScript нет; вместе
-  со схемой приходят девять групп ингредиентов для палитры —
-  «Логика», «История», «Метаданные», «Аудио», «Файлы», «Альбом»,
-  «Артист», «Идентификаторы», «Ссылки»);
-* `GET /api/playlists`, `GET /api/playlists/:slug` — список и
-  карточка подборки (DTO, `.mix`, `.nsp`, признаки external/editable);
-* `POST /api/playlists`,
-  `PUT /api/playlists/:slug[?overwrite=1]` — публикация:
-  DTO → типизированный AST → существующая валидация → канонический
-  `.mix` → `.nsp` (атомарно; коллизия — только 409 без `overwrite`).
-  Итоговый filename в PUT берётся из названия в DTO, поэтому
-  переименование опубликованной подборки меняет файл: сначала
-  записывается новая пара, и только после успешной записи удаляются
-  прежние `.nsp`/`.mix`. Прежний slug из адреса запроса — identity
-  подборки; удаляются только файлы, подтверждённые persisted-состоянием
-  публикации `<rulesDir>/.muzlovar-published.json` (путь + FNV-1a 64
-  хеш записанных байтов), читаемым с диска при каждой публикации.
-  Файл без подтверждения (нет записи, изменилось содержимое,
-  символическая ссылка, чужой каталог) — 422 `cleanup_blocked` до
-  записи, ничего не изменяется; сбой удаления после записи новой
-  пары — 500 `cleanup_failed` (не скрывается как успех);
-* `POST /api/validate` — проверка без записи на диск: в ответе
-  канонические предпросмотры `mix` и `nsp` для вкладок редактора
-  и итоговый `slug` (filename, который получит подборка при
-  публикации — по нему редактор показывает блок «Будет
-  опубликовано» при ожидающем переименовании);
-* `DELETE /api/playlists/:slug` — перенос в корзину;
-* `GET /api/trash`, `POST /api/trash/:id/restore`,
-  `DELETE /api/trash/:id` — корзина;
-* `GET /health` — публичная проверка живости.
-
-Ошибки структурированы: код, русское сообщение, путь в DTO и позиция
-(строка/колонка), где она есть.
-
-> **Персональные поля.** `любимое`, `оценка`, `прослушиваний`,
-> `последнее_прослушивание`, их альбомные и артистные аналоги
-> (`оценка_альбома`, `прослушиваний_артиста`, `дата_любимого` и т. п. —
-> всего 18) вычисляются относительно владельца подборки и его истории
-> прослушивания: одно и то же правило у разных пользователей даёт
-> разные плейлисты. Редактор предупреждает об этом в интерфейсе
-> (под полями «Название»/«Описание», значок «личное» у
-> условия) — и здесь тоже.
-
-## Docker
-
-Сборка образа и запуск через Compose (готовый пример —
-`docker-compose.yaml`):
-
-```bash
-docker build -t nspeller-muzlovar .
+git clone https://github.com/zamyatinmn/muzlovar.git
+cd muzlovar
 docker compose up -d
 ```
 
-В образе два бинарника — `nspeller` и `muzlovar`; GHC и cabal в
-runtime-слой не попадают. Процесс работает от непривилегированного
-пользователя `muzlovar` (uid 10001), есть `HEALTHCHECK` на
-`GET /health` и корректная обработка `SIGTERM` (`tini` + обработчик
-Warp).
+Open <http://localhost:8765>. The default Compose file pulls `ghcr.io/zamyatinmn/muzlovar:latest` and uses Docker-managed volumes, so it works on a fresh clone without GHC, Cabal, host-directory preparation, or local image builds.
 
-Тома и каталоги:
+Authentication is disabled in the zero-config setup. Keep the service on a trusted network, or create a `.env` from [`.env.example`](.env.example) and set both `MUZLOVAR_USERNAME` and `MUZLOVAR_PASSWORD` before exposing it through a reverse proxy.
 
-| Том | Переменная | Содержимое |
-| --- | --- | --- |
-| `/rules` | `MUZLOVAR_RULES_DIR` | исходники `.mix` |
-| `/playlists` | `MUZLOVAR_PLAYLISTS_DIR` | публикуемые `.nsp` (в рабочей схеме — каталог `PlaylistsPath` Navidrome) |
-| `/trash` | `MUZLOVAR_TRASH_DIR` | корзина |
+To make published playlists visible to Navidrome, mount the same `muzlovar_playlists` volume at Navidrome's `PlaylistsPath`, or replace that named volume with a bind mount to your existing playlist directory. The container runs as UID `10001`, so a bind-mounted host directory must be writable by that UID.
 
-Авторизация в примере compose выключена (закомментирована) — это
-внутренний сервис. Если вы exposes-ите его за пределы локальной сети,
-раскомментируйте `MUZLOVAR_USERNAME`/`MUZLOVAR_PASSWORD` и задайте
-надёжный пароль. Образ ничего не
-знает о вашем NAS: адреса Navidrome задаются только переменными
-окружения и по умолчанию не используются.
+```yaml
+services:
+  navidrome:
+    volumes:
+      - muzlovar_playlists:/playlists
+    environment:
+      ND_PLAYLISTSPATH: /playlists
 
-## Синтаксис
-
-Исходные файлы — UTF-8. Пробелы, переводы строк (в том числе CRLF)
-и однострочные комментарии `# …` — разделители:
-
-```text
-# этот текст игнорируется
-подборка "Название"   # комментарий может быть и в конце строки
+volumes:
+  muzlovar_playlists:
+    name: muzlovar_playlists
 ```
 
-Секции могут идти в любом порядке. Обязательны ровно две:
-`подборка` и `где`; повтор любого из секционных операторов — ошибка.
+The image contains both `muzlovar` and `nspeller`; GHC and Cabal stay in the build stage. The runtime process is non-root and is supervised by `tini`. `GET /health` is used for the container health check.
 
-### Грамматика (EBNF)
+### Build the container from source
 
-```ebnf
-файл           ::= { секция }
+Local container development is kept separate from the release image:
 
-секция         ::= "подборка" строка
-                 | "описание" строка
-                 | "публичная"
-                 | где-секция
-                 | сортировка
-                 | "лимит" целое
-
-где-секция     ::= "где" группа
-группа         ::= ("все" | "любое") "{" условия "}"
-
-условия        ::= условие { условие }          (* не менее одного *)
-условие        ::= вложенная-группа
-                 | "не" "звучало" целое "дней"
-                 | членство
-                 | выражение
-
-вложенная-группа ::= ("все" | "любое") "{" условия "}"
-
-членство       ::= [ "не" ] "в" "подборке" вид-ссылки строка
-вид-ссылки     ::= "id" | "файл"
-
-выражение      ::= поле [ оператор ]
-
-оператор       ::= "=" значение
-                 | "!=" значение
-                 | ">" значение
-                 | ">=" значение
-                 | "<" значение
-                 | "<=" значение
-                 | "между" ( число "и" число | дата "и" дата )
-                 | "содержит" значение
-                 | "не" "содержит" значение
-                 | "начинается" "с" значение
-                 | "заканчивается" "на" значение
-                 | "отсутствует"
-                 | "присутствует"
-                 | "за" целое "дней"
-                 | "не" "за" целое "дней"
-                 | "до" дата
-                 | "после" дата
-
-значение       ::= "да" | "нет" | строка | число | дата
-
-сортировка     ::= "порядок" ( "случайный" | "{" правила-сортировки "}" )
-правила-сортировки ::= правило-сортировки { правило-сортировки }
-правило-сортировки ::= поле направление
-направление    ::= "возр" | "убыв"
-
-строка         ::= '"' { символ-кроме-кавычки-и-управляющих | escape } '"'
-escape         ::= "\\" ( '"' | "\\" | "n" | "t" | "r" )
-число          ::= [ "-" ] цифра { цифра } [ "." цифра { цифра } ]
-целое          ::= [ "-" ] цифра { цифра }
-дата           ::= цифра-4 "-" цифра-2 "-" цифра-2   (* ГГГГ-ММ-ДД *)
-поле           ::= идентификатор                (* см. таблицу полей *)
-идентификатор  ::= буква-или-цифра-или-подчёркивание { … }
-комментарий    ::= "#" { любой-символ-до-конца-строки }
+```bash
+docker compose -f docker-compose.yaml -f docker-compose.dev.yaml up -d --build
 ```
 
-Замечания:
+The override builds the same production Dockerfile locally and tags it as `muzlovar:local`. It does not push anything to GHCR.
 
-* пустая группа (`где все { }`) запрещена — требуется хотя бы одно условие;
-* `в подборке id "…"` / `не в подборке файл "…"` — членство трека в
-  подборке Navidrome: `id` — идентификатор подборки, `файл` — путь к
-  её файлу (например `other.nsp`); само наличие подборки не
-  проверяется, но пустая ссылка (`id ""`) — ошибка валидации;
-* без оператора можно писать только булевы поля: `любимое`
-  эквивалентно `любимое = да`;
-* `не звучало N дней` — отдельная форма без пола (про
-  `последнее_прослушивание`); у датовых полей есть также
-  `за N дней` и `не за N дней` (`добавлено не за 30 дней`);
-* абсолютная дата пишется как `ГГГГ-ММ-ДД` и разрешена везде, где
-  значение: `последнее_прослушивание = 2024-06-01`,
-  `добавлено >= 2024-01-01`, `последнее_прослушивание до 2024-06-01`,
-  `добавлено между 2024-01-01 и 2024-12-31`; дату можно заключить
-  в кавычки — `последнее_прослушивание = "2024-06-01"`;
-* у поля `explicit` значения `=`/`!=` ограничены набором:
-  `e` (Explicit), `c` (Clean), `""` (Не определено); текстовые
-  операторы (`содержит` и т. п.) работают со строкой как обычно;
-* числа могут быть дробными (`replaygain = -6.5`); целочисленные
-  поля (`год`, `оценка`, `прослушиваний`) дробные значения
-  отклоняют с точной ошибкой;
-* слово `дней` пишется только так (склонения `день`/`дня` не поддерживаются);
-* секция `лимит` необязательна; значение должно быть **положительным**
-  целым числом;
-* сортировать можно только по известным полям (71 поле реестра —
-  все, кроме ссылки `подборка`);
-* в строках поддерживаются экранирования `\"`, `\\`, `\n`, `\t`, `\r`.
-
-## Поля
-
-Реестр `defaultRegistry` содержит **72 записи**: 71 статическое поле
-из таблицы Fields официальной документации Navidrome плюс
-псевдополе-ссылку `подборка`. Одна запись `FieldSpec a` описывает
-имя в DSL, имя в `.nsp`, заголовок, группу палитры, вид, операторы,
-границы и признаки — реестр единственный источник правды для
-компилятора, валидатора, `/api/schema` и палитры редактора.
-
-Операторы определяются видом поля (см. таблицу «Операторы» ниже):
-текстовым доступны `=`, `!=` и строковые, числовым — `=`, `!=`, `>`,
-`<`, `>=`, `<=`, `между … и …`, датовым — те же сравнения плюс
-`до`, `после`, `за N дней`, логическим — `= да`/`= нет`/`!=` и сахар
-`любимое`. Доступность `отсутствует`/`присутствует` и видимость
-`min`/`max`/`step` задаются признаком поля в реестре.
-
-### Группа «Логика»
-
-| DSL | NSP | Тип |
-| --- | --- | --- |
-| `любимое` | `loved` | логический |
-| `оценка` | `rating` | число (0..5, шаг 1) |
-| `средняя_оценка` | `averagerating` | число (дробное) |
-| `обложка` | `hascoverart` | логический |
-| `сборник` | `compilation` | логический |
-
-### Группа «История»
-
-| DSL | NSP | Тип |
-| --- | --- | --- |
-| `прослушиваний` | `playcount` | число (целое ≥ 0) |
-| `последнее_прослушивание` | `lastplayed` | дата |
-| `добавлено` | `dateadded` | дата |
-| `дата_любимого` | `dateloved` | дата |
-| `дата_оценки` | `daterated` | дата |
-
-### Группа «Метаданные»
-
-| DSL | NSP | Тип |
-| --- | --- | --- |
-| `название` | `title` | текст |
-| `альбом` | `album` | текст, `отсутствует`/`присутствует` |
-| `жанр` | `genre` | текст (multivalue), `отсутствует`/`присутствует` |
-| `explicit` | `explicitstatus` | текст (enum: `e`/`c`/`""`), `отсутствует`/`присутствует` |
-| `год` | `year` | число (целое) |
-| `дата_записи` | `date` | дата |
-| `оригинальный_год` | `originalyear` | число (целое) |
-| `оригинальная_дата` | `originaldate` | дата |
-| `год_релиза` | `releaseyear` | число (целое) |
-| `дата_релиза` | `releasedate` | дата |
-| `номер_трека` | `tracknumber` | число (целое ≥ 0) |
-| `номер_диска` | `discnumber` | число (целое ≥ 0) |
-| `подзаголовок_диска` | `discsubtitle` | текст, `отсутствует`/`присутствует` |
-| `комментарий` | `comment` | текст, `отсутствует`/`присутствует` |
-| `текст_песни` | `lyrics` | текст, `отсутствует`/`присутствует` |
-| `сортировка_названия` | `sorttitle` | текст, `отсутствует`/`присутствует` |
-| `сортировка_альбома` | `sortalbum` | текст, `отсутствует`/`присутствует` |
-| `сортировка_артиста` | `sortartist` | текст, `отсутствует`/`присутствует` |
-| `сортировка_альбомного_артиста` | `sortalbumartist` | текст, `отсутствует`/`присутствует` |
-| `номер_в_каталоге` | `catalognumber` | текст, `отсутствует`/`присутствует` |
-| `replaygain` | `rgtrackgain` | число (дробное), `отсутствует`/`присутствует` |
-| `replaygain_пик` | `rgtrackpeak` | число (дробное), `отсутствует`/`присутствует` |
-| `replaygain_альбом` | `rgalbumgain` | число (дробное), `отсутствует`/`присутствует` |
-| `replaygain_пик_альбом` | `rgalbumpeak` | число (дробное), `отсутствует`/`присутствует` |
-
-### Группа «Аудио»
-
-| DSL | NSP | Тип |
-| --- | --- | --- |
-| `длительность` | `duration` | число (дробное ≥ 0) |
-| `кодек` | `codec` | текст |
-| `битрейт` | `bitrate` | число (целое ≥ 0) |
-| `битовая_глубина` | `bitdepth` | число (целое ≥ 0), `отсутствует`/`присутствует` |
-| `частота_дискретизации` | `samplerate` | число (целое ≥ 0) |
-| `темп` | `bpm` | число (целое ≥ 0), `отсутствует`/`присутствует` |
-| `каналы` | `channels` | число (целое ≥ 0) |
-
-### Группа «Файлы»
-
-| DSL | NSP | Тип |
-| --- | --- | --- |
-| `путь_к_файлу` | `filepath` | текст |
-| `тип_файла` | `filetype` | текст |
-| `размер` | `size` | число (целое ≥ 0) |
-| `изменено` | `datemodified` | дата |
-| `файл_отсутствует` | `missing` | логический |
-
-### Группа «Альбом»
-
-| DSL | NSP | Тип |
-| --- | --- | --- |
-| `комментарий_альбома` | `albumcomment` | текст, `отсутствует`/`присутствует` |
-| `оценка_альбома` | `albumrating` | число (0..5, шаг 1) |
-| `любимый_альбом` | `albumloved` | логический |
-| `прослушиваний_альбома` | `albumplaycount` | число (целое ≥ 0) |
-| `последнее_прослушивание_альбома` | `albumlastplayed` | дата |
-| `дата_любимого_альбома` | `albumdateloved` | дата |
-| `дата_оценки_альбома` | `albumdaterated` | дата |
-| `дата_добавления_альбома` | `albumdateadded` | дата |
-| `дата_изменения_альбома` | `albumdatemodified` | дата |
-| `длительность_альбома` | `albumduration` | число (дробное ≥ 0) |
-| `треков_в_альбоме` | `albumsongcount` | число (целое ≥ 0) |
-| `размер_альбома` | `albumsize` | число (целое ≥ 0) |
-
-### Группа «Артист»
-
-| DSL | NSP | Тип |
-| --- | --- | --- |
-| `оценка_артиста` | `artistrating` | число (0..5, шаг 1) |
-| `любимый_артист` | `artistloved` | логический |
-| `прослушиваний_артиста` | `artistplaycount` | число (целое ≥ 0) |
-| `последнее_прослушивание_артиста` | `artistlastplayed` | дата |
-| `дата_любимого_артиста` | `artistdateloved` | дата |
-| `дата_оценки_артиста` | `artistdaterated` | дата |
-
-### Группа «Идентификаторы»
-
-| DSL | NSP | Тип |
-| --- | --- | --- |
-| `mbid_альбома` | `mbz_album_id` | текст, `отсутствует`/`присутствует` |
-| `mbid_альбомного_артиста` | `mbz_album_artist_id` | текст, `отсутствует`/`присутствует` |
-| `mbid_артиста` | `mbz_artist_id` | текст, `отсутствует`/`присутствует` |
-| `mbid_записи` | `mbz_recording_id` | текст, `отсутствует`/`присутствует` |
-| `mbid_трека_релиза` | `mbz_release_track_id` | текст, `отсутствует`/`присутствует` |
-| `mbid_группы_релизов` | `mbz_release_group_id` | текст, `отсутствует`/`присутствует` |
-| `библиотека` | `library_id` | число (целое) |
-
-### Группа «Ссылки»
-
-| DSL | NSP | Тип |
-| --- | --- | --- |
-| `подборка` | `inPlaylist` / `notInPlaylist` | ссылка (id или путь к файлу) |
-
-Имена Navidrome взяты из официальной таблицы полей (алиасы вида
-`replaygain_track_gain`, `lastPlayed`, `playCount`, `dateLoved`
-принимаются при разборе, но в `.nsp` всегда выводится каноническое
-имя); `отсутствует` / `присутствует` разрешены ровно там, где
-документация Navidrome перечисляет поддержку `isMissing`/`isPresent`.
-
-У `жанр` (multivalue) два равенства в группе `все` — не противоречие:
-значения могут принадлежать разным тегам трека.
-
-Не поддерживаются: `random` (только сортировка, не условие),
-`albumtype` (используйте `releasetype`), динамические теги Navidrome
-(`artist`, `composer`, `mood` и т. п.), пользовательские поля
-из конфигурации Navidrome.
-
-## Операторы
-
-| DSL | NSP-оператор | Ожидаемый тип поля | Ожидаемое значение |
-| --- | --- | --- | --- |
-| `=` | `is` | текст / число / логический / дата | по типу поля |
-| `!=` | `isNot` | текст / число / логический / дата | по типу поля |
-| `>` | `gt` | число / дата | число или дата |
-| `>=` | `gt` или `is` (lowerинг) | число / дата | число или дата |
-| `<` | `lt` | число / дата | число или дата |
-| `<=` | `lt` или `is` (lowerинг) | число / дата | число или дата |
-| `между A и B` | `inTheRange` | число / дата | два числа либо две даты, `A ≤ B` |
-| `содержит` | `contains` | текст | строка |
-| `не содержит` | `notContains` | текст | строка |
-| `начинается с` | `startsWith` | текст | строка |
-| `заканчивается на` | `endsWith` | текст | строка |
-| `отсутствует` | `isMissing` | поля с признаком наличия (см. таблицы групп) | — |
-| `присутствует` | `isPresent` | поля с признаком наличия (см. таблицы групп) | — |
-| `за N дней` | `inTheLast` | дата | целое > 0 |
-| `не звучало N дней` | `notInTheLast` (`lastplayed`) | — | целое > 0 |
-| `не за N дней` | `notInTheLast` (`dateadded`) | дата | целое > 0 |
-| `до A` | `before` | дата | дата |
-| `после A` | `after` | дата | дата |
-| сахар `любимое` | `is { loved: true }` | логический | — |
-| `в подборке` | `inPlaylist` | ссылка (id или путь) | `id "…"` либо `файл "…"` |
-| `не в подборке` | `notInPlaylist` | ссылка (id или путь) | `id "…"` либо `файл "…"` |
-
-Несовместимые комбинации отклоняются **до** генерации JSON, например:
+## How it works
 
 ```text
-любимое > 3      → оператор «>» только для числовых полей
-жанр > 10        → оператор «>» только для числовых полей
-оценка содержит "rock" → оператор «содержит» только для текстовых полей
-добавлено содержит "вчера" → оператор «содержит» только для текстовых полей
+Visual editor DTO ─┐
+                   ├─> typed Haskell AST -> validation -> canonical .mix
+Russian .mix DSL ──┘                                      |
+                                                            v
+                                                Navidrome model -> .nsp JSON
 ```
 
-В Navidrome нет `>=` и `<=`: NSPeller понижает их в допустимый НСП.
-`оценка >= 4` компилируется в «`rating` больше 4 **или** равен 4»
-(`gt OR is`), `оценка <= 4` — в `lt OR is`. Если в одной группе `все`
-стоят обе границы одного поля (`оценка >= 2` и `оценка <= 5`, порядок
-не важен), пара склеивается в одно нативное условие `inTheRange`;
-в группе `любое` условия лежат в разных ветвях и не склеиваются.
+The field registry is the single source of truth for field names, types, allowed operators, numeric limits, UI palette groups, and sort support. `/api/schema` exposes that model to the UI. `/api/validate` converts the current editor DTO into the same typed AST used by Nspeller, then returns canonical `.mix` and `.nsp` previews. JavaScript manages browser interactions only; it does not duplicate NSP generation.
 
-## Числовые границы и предупреждения
+Muzlovar is server-rendered HTML (Scotty + Lucid) with vanilla JavaScript and CSS. There is no client framework and no production Node.js dependency.
 
-Числовые поля несут известные границы — единый источник для валидатора
-и UI (в `/api/schema` у поля появляются `min`/`max`/`step`):
+## Product tour
 
-| Поле | min | max | step |
-| --- | --- | --- | --- |
-| `оценка`, `оценка_альбома`, `оценка_артиста` | 0 | 5 | 1 |
-| `прослушиваний`, `прослушиваний_альбома`, `прослушиваний_артиста`, `номер_трека`, `номер_диска`, `битрейт`, `битовая_глубина`, `частота_дискретизации`, `темп`, `каналы`, `размер`, `размер_альбома`, `треков_в_альбоме`, `год` | 0 | — | 1 |
-| `длительность`, `длительность_альбома` | 0 | — | — |
-| `оригинальный_год`, `год_релиза`, `библиотека`, `средняя_оценка`, `replaygain` и остальные поля ReplayGain | — | — | — |
+Muzlovar provides three main views:
 
-У `год` есть только нижняя граница: отрицательных годов в каталоге
-не бывает, а верхний предел реестр выдумывать не должен.
+- **Playlists** lists `.mix` and `.nsp` files, metadata, rule summaries, publication state, modification time, and `managed`, `external`, or `broken` status.
+- **Editor** combines an ingredient palette, nested rule tree, sorting and limit controls, validation feedback, and live `.mix`/`.nsp` previews. Published playlists can be updated, renamed, or saved as a new playlist.
+- **Trash** contains recoverable deletions and supports restore or permanent removal.
 
-**Ошибки** (блокируют компиляцию):
+Deletion moves managed files to Muzlovar's trash. It does not edit Navidrome's database directly. If all three Subsonic settings are present, Muzlovar can also call `deletePlaylist`; otherwise delete the imported playlist in Navidrome's UI if necessary.
 
-* значение вне границ: `оценка = 7`, `прослушиваний >= -1`, `год = -1`;
-* условие, не допускающее ни одного допустимого значения:
-  `оценка > 5`, `прослушиваний < 0`;
-* диапазон вне домена: `оценка между 0 и 6` (частично) и
-  `оценка между 7 и 9` (не пересекает домен);
-* противоречащие условия: `год >= 2020` вместе с `год <= 2000`.
+Personal fields such as favourites, ratings, play counts, and last-played dates are evaluated by Navidrome for the playlist owner. The same NSP may therefore produce different results for different owners.
 
-**Предупреждения** (компиляция успешна, результат не меняется): CLI
-печатает их в stderr, API отдаёт ключом `warnings`, UI показывает
-жёлтым. К видам относятся:
+## Configuration
 
-* точный дубликат условия в одной ветви (`год > 2020` дважды);
-* избыточное условие: `год > 2000` ничего не добавляет к `год > 2020`;
-* условие, покрывающее весь допустимый диапазон и не отбрасывающее
-  ни одного значения: `оценка >= 0`, `оценка между 0 и 5`.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `MUZLOVAR_USERNAME` | unset | Optional Basic Auth username; must be set together with the password |
+| `MUZLOVAR_PASSWORD` | unset | Optional Basic Auth password; must be set together with the username |
+| `MUZLOVAR_RULES_DIR` | `./rules` | Source `.mix` directory |
+| `MUZLOVAR_PLAYLISTS_DIR` | `./playlists` | Published `.nsp` directory, normally Navidrome's `PlaylistsPath` |
+| `MUZLOVAR_TRASH_DIR` | `./trash` | Recoverable trash directory |
+| `MUZLOVAR_PORT` | `8765` | HTTP port, from 1 to 65535 |
+| `MUZLOVAR_HOST` | `*` | Bind address |
+| `MUZLOVAR_SUBSONIC_URL` | unset | Optional Subsonic API base URL |
+| `MUZLOVAR_SUBSONIC_USER` | unset | Subsonic username |
+| `MUZLOVAR_SUBSONIC_PASSWORD` | unset | Subsonic password |
 
-Условия из **разных ветвей** `любое` никогда не считаются дубликатами
-или противоречием друг друга.
+Basic Auth is enabled only when both credentials are non-empty. With neither credential set, the application is unauthenticated; with only one set, startup fails. `/health` and `/static/*` remain public when authentication is enabled.
 
-## Логика, сортировка, лимит
+The Subsonic adapter is enabled only when URL, username, and password are all supplied. Credentials and URL query strings are scrubbed from connection-error logs.
 
-* `где все { … }` → ключ `"all"`, `где любое { … }` → ключ `"any"`;
-* группы `все`/`любое` вкладываются друг в друга без ограничений;
-* общего отрицания `не` в MVP нет — используйте конкретные
-  отрицательные операторы (`!=`, `не содержит`);
-* `порядок случайный` → `"sort": "random"`;
-* `порядок { год убыв … }` → `"sort": "-year,…"`, `возр` — без префикса;
-* `публичная` → `"public": true`;
-* `описание` → `"comment"`; незаданные секции в JSON не выводятся.
+### Running from source
 
-## Примеры
+Requirements: GHC 9.6 or newer (9.10.3 is used by the container and CI), Cabal 3.10 or newer, and Hackage access for the first build.
 
-Пять примеров лежат в каталоге [`examples/`](examples/).
+```bash
+cabal build
+cabal run exe:muzlovar
+```
 
-### 1. Забытое любимое (`examples/forgotten.mix`)
+The local development server uses `./rules`, `./playlists`, and `./trash` by default and listens on <http://127.0.0.1:8765/>.
+
+Release tags matching `vX.Y.Z` publish images for `linux/amd64`. A tag such as `v1.2.3` produces `1.2.3`, `1.2`, `1`, and `latest`. Normal pushes to `master` never publish or replace container tags. ARM64 is not published yet because the current `crypton` dependency does not compile successfully for that target in the container build.
+
+## Nspeller: the compiler behind Muzlovar
+
+Nspeller turns the human-readable `.mix` DSL into Navidrome `.nsp` JSON. The DSL keywords are intentionally Russian; an English grammar or translated UI is not currently implemented. Files are UTF-8 and may contain `#` line comments.
 
 ```text
-подборка "Забытое любимое"
-описание "Любимые треки, которые давно не звучали"
+подборка "Forgotten favourites"
+описание "Loved tracks that have not played recently"
 
 где все {
   любимое
@@ -668,233 +147,117 @@ escape         ::= "\\" ( '"' | "\\" | "n" | "t" | "r" )
 лимит 100
 ```
 
-### 2. Рок восьмидесятых (`examples/eighties-rock.mix`)
+### CLI
+
+```bash
+# Validate without writing output
+nspeller check examples/forgotten.mix
+
+# Compile next to the source file
+nspeller build examples/forgotten.mix
+
+# Compile to an explicit path
+nspeller build examples/forgotten.mix --output /path/to/forgotten.nsp
+
+# Validate every direct child *.mix first, then compile the whole batch
+nspeller build-all ./rules --output ./playlists
+```
+
+`build-all` is non-recursive. If any source is invalid, every error is reported and no output is changed. Successful writes use a temporary file in the destination directory followed by a rename; orphaned `.nsp` files are not deleted.
+
+### DSL structure
+
+Every file needs exactly one `подборка` (playlist name) section and one `где` (rules) section. Optional sections add `описание` (comment), `публичная` (`public: true`), `порядок` (sort), and `лимит` (positive limit). Sections may appear in any order.
+
+```ebnf
+file        ::= { section }
+section     ::= "подборка" string
+              | "описание" string
+              | "публичная"
+              | "где" group
+              | sort
+              | "лимит" integer
+group       ::= ("все" | "любое") "{" condition { condition } "}"
+condition   ::= group | expression | playlist-membership | not-played
+```
+
+Groups compile to Navidrome's `all` and `any` nodes and may be nested without a fixed depth limit. Supported operations include equality/inequality, numeric and date comparisons, ranges, text contains/prefix/suffix operations, missing/present checks where Navidrome supports them, relative dates, playlist membership, and the `любимое` favourite shorthand.
+
+Nspeller lowers `>=` and `<=` into valid Navidrome expressions because NSP has no native inclusive comparison. Compatible lower and upper bounds in an `all` group may be folded into `inTheRange`.
+
+The registry currently covers track metadata; listening-history and rating fields; album and artist aggregate fields; audio/file properties; MusicBrainz identifiers; and playlist references. It rejects undocumented or unsupported combinations before JSON generation. Dynamic Navidrome tags and arbitrary custom fields are not supported.
+
+For the exhaustive field tables, operator matrix, grammar, numeric bounds, warning rules, all five examples, JSON format, type-safety notes, and exact error categories, see the preserved [Nspeller reference in Russian](docs/nspeller-reference.ru.md). The runnable source/expected-output pairs are in [`examples/`](examples/).
+
+### Validation and warnings
+
+Validation collects all errors in a file instead of stopping at the first one. It checks required and duplicate sections, field/operator compatibility, value types and ranges, integer-only fields, sort fields, non-empty playlist references, contradictory numeric conditions, and positive limits.
+
+Non-fatal warnings cover exact duplicates, redundant bounds, and conditions that cover an entire known domain. Conditions in separate `any` branches are not treated as contradictions or duplicates.
+
+The validated AST is type-indexed: a text condition requires `FieldRef Text`, a number condition requires `FieldRef Scientific`, and so on. Invalid field/operator combinations cannot be represented after validation.
+
+### Output
+
+Generated NSP is ordinary JSON with no comments. Optional keys are omitted when absent. Output is deterministic, pretty-printed with two-space indentation, and ends with a newline. Golden tests pin the current byte representation, although JSON object key order is not part of the external contract.
+
+## HTTP API
+
+- `GET /api/schema` — fields, operators, constraints, and palette groups from the Haskell registry.
+- `GET /api/playlists` and `GET /api/playlists/:slug` — playlist list and details.
+- `POST /api/validate` — validation plus canonical `.mix` and `.nsp` previews; no disk write.
+- `POST /api/playlists` — publish a new playlist.
+- `PUT /api/playlists/:slug[?overwrite=1]` — update or rename a managed playlist.
+- `DELETE /api/playlists/:slug` — move a managed playlist to trash.
+- `GET /api/trash`, `POST /api/trash/:id/restore`, `DELETE /api/trash/:id` — trash lifecycle.
+- `GET /health` — public liveness check.
+
+Publishing writes `.mix` and `.nsp` as one managed pair. A persisted `.muzlovar-published.json` file records the paths and FNV-1a hashes of bytes written by Muzlovar. Rename cleanup is allowed only when that record still matches; changed, foreign, symlinked, or out-of-directory files block cleanup instead of being silently removed.
+
+## Tests
+
+```bash
+cabal test all
+cabal build all
+```
+
+The Haskell suite contains unit, golden, QuickCheck property, DTO/AST round-trip, schema-consistency, store, and WAI integration tests. It covers atomic write/rollback behaviour, collisions, path traversal, symlinks, managed/external/broken states, Basic Auth, API errors, rename, and the trash lifecycle.
+
+Browser E2E tests require Node.js and a local Chrome/Chromium executable:
+
+```bash
+cd muzlovar/e2e
+npm ci
+npm test
+npm run test:publish-rename
+npm run test:save-as-new
+```
+
+Set `MUZLOVAR_E2E_CHROME` to a browser executable when it cannot be discovered automatically. Set `MUZLOVAR_E2E_SKIP_BUILD=1` to reuse an already-built `muzlovar` binary.
+
+## Current limitations
+
+- Muzlovar is file-backed; it has no application database or file watcher.
+- Subsonic integration only looks up playlists and deletes a playlist entity. Creation and updates happen by writing `.nsp` files for Navidrome to scan.
+- The UI, DSL keywords, and application error messages are Russian-only.
+- There is no music-file analysis, recommendation engine, ML, Android integration, or recursive `build-all`.
+- `limitPercent`, general negation, list operands, and arbitrary custom Navidrome fields are not supported.
+- External NSP trees containing nodes that cannot be represented by the DSL are read-only.
+
+## Project layout
 
 ```text
-подборка "Рок восьмидесятых"
-
-где все {
-  год между 1980 и 1989
-  жанр содержит "rock"
-  любое {
-    любимое
-    оценка > 3
-  }
-}
-
-порядок {
-  год убыв
-  оценка убыв
-  название возр
-}
-
-лимит 200
+app/                         Nspeller CLI entry point
+muzlovar/                    Muzlovar executable, static assets, and E2E tests
+src/Nspeller/                parser, typed model, validation, rendering, CLI
+src/Nspeller/Muzlovar/       server, HTML, store, DTOs, and Subsonic adapter
+examples/                    complete .mix -> .nsp examples
+test/                        Haskell unit, golden, property, and integration tests
+docs/nspeller-reference.ru.md exhaustive Russian-language technical reference
 ```
 
-Компилируется (без переносов строк) в:
+## Contributing and security
 
-```json
-{
-  "all": [
-    { "inTheRange": { "year": [1980, 1989] } },
-    { "contains": { "genre": "rock" } },
-    { "any": [ { "is": { "loved": true } }, { "gt": { "rating": 3 } } ] }
-  ],
-  "limit": 200,
-  "name": "Рок восьмидесятых",
-  "sort": "-year,-rating,title"
-}
-```
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the development workflow. Please report vulnerabilities according to [`SECURITY.md`](SECURITY.md), not in a public issue.
 
-### 3. Свежее и непрослушанное (`examples/new-unplayed.mix`)
-
-```text
-подборка "Свежее и непрослушанное"
-описание "Добавлено за две недели и почти не звучало"
-
-где все {
-  добавлено за 14 дней
-  прослушиваний < 2
-  не звучало 3 дней
-}
-
-порядок случайный
-лимит 40
-```
-
-### 4. Глубокий каталог (`examples/deep-catalog.mix`)
-
-```text
-подборка "Глубокий каталог"
-описание "Старые релизы с обложкой и ReplayGain"
-
-где все {
-  год < 2000
-  обложка = да
-  replaygain присутствует
-  любое {
-    жанр начинается с "progressive"
-    жанр содержит "psyched"
-  }
-}
-
-порядок {
-  год возр
-  название возр
-}
-
-лимит 300
-```
-
-### 5. Любимые хиты (`examples/favorites.mix`)
-
-```text
-# Публичная подборка самых любимых и часто звучащих треков.
-подборка "Любимые хиты"
-описание "Любимые треки с высоким числом прослушиваний"
-публичная
-
-где все {
-  любимое
-  прослушиваний > 10
-  оценка != 1
-}
-
-порядок {
-  прослушиваний убыв
-}
-
-лимит 150
-```
-
-## Использование с Navidrome
-
-1. Скомпилируйте `.mix`:
-
-   ```bash
-   nspeller build forgotten.mix
-   ```
-
-2. Положите полученный `forgotten.nsp` в каталог `PlaylistsPath`
-   (см. [Configuration Options](https://www.navidrome.org/docs/usage/configuration/options/))
-   или в любую папку музыкальной библиотеки.
-
-3. Запустите сканирование (или дождитесь автоматического):
-   при необходимости `navidrome scan`; изменения `.nsp`
-   подхватываются при следующем сканировании.
-
-4. При необходимости назначьте владельца подборки в UI Navidrome
-   (Playlists → владелец).
-
-### Многопользовательский режим
-
-Персональные поля — 18 записей реестра: `loved`, `rating`,
-`playcount`, `lastplayed`, их альбомные (`album*`) и артистные
-(`artist*`) аналоги, `dateloved`/`daterated` — вычисляются
-относительно **владельца** smart playlist. Подборка
-обновляется по истории прослушивания и оценок именно этого пользователя.
-Чтобы получить персонализированные подборки для разных пользователей,
-создайте отдельные `.nsp` и назначьте каждому своего владельца
-(или используйте `публичная` для общих подборок).
-
-## Типобезопасность и property-тесты
-
-Поля описаны реестром `defaultRegistry`: одна запись `FieldSpec a`
-на поле, а ссылка на поле — `FieldRef a` с индексом из `spKind`
-записи (каталога конкретных полей в коде нет):
-
-```haskell
-newtype FieldRef a = FieldRef { refSpec :: FieldSpec a }
-
-data FieldKind a where
-  KindText   :: FieldKind Text
-  KindNumber :: FieldKind Scientific
-  KindBool   :: FieldKind Bool
-  KindDate   :: FieldKind Day
-  …
-
-data ValidCond
-  = VText    (FieldRef Text)      TextOp Text
-  | VNumber  (FieldRef Scientific) NumOp  Scientific
-  | VBool    (FieldRef Bool)      Bool
-  | VRelative (FieldRef Day)      RelOp  Integer
-  | …
-```
-
-Конструктор `VText` типизирован так, что передать в него поле `год`
-(`FieldRef Scientific`) невозможно — нарушается тип. Индекс берётся
-из `spKind` спецификации, а валидация получает свидетельство типа
-через `kindEq` при совпадении вида. То есть свойство
-«валидированный AST не порождает несовместимых комбинаций
-поле/оператор» выполняется **по построению типов**, и содержательный
-рандомный тест его не нужен. Вместо этого property-тест проверяет
-наблюдаемую соседнюю гарантию: для любого сгенерированного условия
-пара «(оператор Navidrome, тип поля)» проходит по таблице
-совместимости, составленной по официальной документации Navidrome
-(`navOpAllows`).
-
-Аналогично, положительность `limit` гарантируется на этапе валидации
-(и проверяется unit-тестами на `лимит 0` / `лимит -5`); property-тест
-дополнительно следит, что модель NSP никогда не получит
-неположительный лимит из любого сгенерированного AST.
-
-Детерминированность pretty-print закреплена двумя способами:
-property-тест «байты не меняются после декодирования и повторного
-кодирования» (каноничность) и golden-тесты, сравнивающие байты
- эталонных `.nsp`.
-
-## Формат JSON
-
-* обычный JSON без комментариев;
-* незаданные поля не выводятся;
-* структура только `all`/`any` и операторы Navidrome;
-* pretty-print: отступ 2 пробела, ключи по алфавиту, завершающий
-  перевод строки;
-* порядок ключей не является частью контракта, кроме golden-файлов
-  (сериализация детерминирована).
-
-## Категории ошибок
-
-1. синтаксические ошибки (позиция из megaparsec);
-2. неизвестное поле;
-3. оператор, несовместимый с типом поля;
-4. неверное значение (тип, отрицательные дни, перевёрнутый диапазон,
-   значение вне enum-набора, дробное значение целочисленного поля,
-   пустая ссылка на подборку);
-5. дублирующаяся секция;
-6. отсутствие `подборка`;
-7. отсутствие `где`;
-8. неположительный `лимит`;
-9. недопустимое поле сортировки (неизвестное);
-10. ошибки файловой системы (чтение, запись, кодировка, каталог).
-
-В production-коде не используются `error`, `undefined` и частичные
-функции.
-
-## Ограничения MVP
-
-* БД нет: Muzlovar работает только с файлами на диске, база данных
-  Navidrome не читается и не изменяется напрямую (валидация и
-  статусы живут в `.mix`/`.nsp`);
-* демона и file-watcher нет — правки `.mix`/`.nsp`, сделанные вне
-  редактора, видны после обновления страницы;
-* Subsonic-интеграция минимальна: только удаление сущности
-  подборки (`deletePlaylist`), создание и обновление через API
-  не выполняются;
-* нет чтения музыкальных файлов, анализа аудио, рекомендаций и ML;
-* нет интеграции с Android;
-* DSL только на русском; английская версия не поддерживается;
-* произвольные пользовательские поля не поддерживаются;
-* `build-all` не обходит каталоги рекурсивно;
-* `limitPercent` не поддерживается — только `лимит N`;
-* нет общего отрицания `не`;
-* множественные значения (списки) не поддерживаются — только
-  одиночные операнды;
-* `дня`/`день` не склоняются — только `дней`;
-* `публичная` выражает только `public: true`;
-* проверка наличия разрешена не для всех полей — только там, где это
-  документировано Navidrome (24 поля: `альбом`, `жанр`, `explicit`,
-  ReplayGain-поля, комментарии, текст песни, сортировочные поля,
-  `номер_в_каталоге`, MusicBrainz ID, `битовая_глубина`, `темп`);
-* сортировать можно только по полям из реестра (71 поле — все,
-  кроме ссылки `подборка`).
+Muzlovar and Nspeller are available under the [MIT License](LICENSE).
