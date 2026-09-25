@@ -9,6 +9,7 @@
 -- и @muzlovar.css@.
 module Nspeller.Muzlovar.Html
   ( renderHtml
+  , NavSection (..)
   , layout
   , layoutWith
   , indexPage
@@ -36,17 +37,33 @@ renderHtml = renderText
 -- Общий каркас
 ------------------------------------------------------------------------------
 
--- | Страница с шапкой, подвалом, тостами и подключёнными скриптами.
+-- | Страница с шапкой, подвалом, тостами и подключёнными скриптами —
+-- активный раздел навигации не подсвечен (страница ошибки).
 layout :: Text -> Html () -> Html ()
-layout title = layoutWith title Nothing
+layout title = layoutWith Nothing title Nothing
+
+-- | Раздел шапки, подсвеченный в навигации.
+--
+-- Навигация живёт в шапке на всех страницах и состоит ровно из трёх
+-- ссылок — тех, что раньше прятались в модалке «Настройки».
+data NavSection
+  = NavPlaylists
+    -- ^ «Подборки»: список и редактор существующей подборки.
+  | NavNew
+    -- ^ «Новая подборка»: редактор без slug.
+  | NavTrash
+    -- ^ «Корзина».
+  deriving (Eq, Show)
 
 -- | Каркас страницы.
 --
--- Второй аргумент — содержимое справа в шапке (кнопки редактора).
--- @Just@ переключает каркас в режим редактора: подвал скрыт, @main@
--- занимает всю высоту окна — три колонки на весь экран.
-layoutWith :: Text -> Maybe (Html ()) -> Html () -> Html ()
-layoutWith title mHeaderActions mainContent =
+-- Первый аргумент — активный раздел навигации шапки ('Nothing' — ни
+-- один не подсвечен), второй — содержимое справа в шапке (кнопки
+-- редактора). @Just@ во втором переключает каркас в режим редактора:
+-- подвал скрыт, @main@ занимает всю высоту окна — три колонки на весь
+-- экран.
+layoutWith :: Maybe NavSection -> Text -> Maybe (Html ()) -> Html () -> Html ()
+layoutWith mSection title mHeaderActions mainContent =
   doctypehtml_ (html_ [lang_ "ru"] page)
   where
     editorMode = isJust mHeaderActions
@@ -61,7 +78,7 @@ layoutWith title mHeaderActions mainContent =
             <> link_ [rel_ "stylesheet", href_ "/static/muzlovar.css"]
         )
         <> body_
-          ( header_ [class_ "app"] (brand <> headerActions)
+          ( header_ [class_ "app"] (brand <> mainNav <> headerActions)
               <> main_ [class_ (if editorMode then "main-full" else "main")] mainContent
               <> footerEl
               <> div_ [id_ "toasts", makeAttribute "aria-live" "polite"] ""
@@ -69,7 +86,8 @@ layoutWith title mHeaderActions mainContent =
               <> dialogs
           )
 
-    -- Логотип — ссылка на список подборок (навигация есть и в меню настроек).
+    -- Логотип — ссылка на список подборок (та же цель, что и у
+    -- навигационного пункта «Подборки»).
     brand =
       a_
         [href_ "/", class_ "brand", makeAttribute "title" "К списку подборок"]
@@ -89,30 +107,42 @@ layoutWith title mHeaderActions mainContent =
               )
         )
 
-    headerActions =
-      div_ [class_ "header-actions"] (connStatus <> settingsButton <> fromMaybe mempty mHeaderActions)
+    -- Единственная навигация продукта: три раздела, активный помечен
+    -- классом active и aria-current. Раздел редактора — «Подборки»
+    -- (список и правка существующей) либо «Новая подборка» для /new.
+    mainNav =
+      nav_
+        [class_ "app-nav", makeAttribute "aria-label" "Основная навигация"]
+        ( navLink NavPlaylists "/" "Подборки"
+            <> navLink NavNew "/new" "Новая подборка"
+            <> navLink NavTrash "/trash" "Корзина"
+        )
 
-    -- Индикатор доступности прода: опрашивает публичный /health.
+    navLink :: NavSection -> Text -> Text -> Html ()
+    navLink sec target caption =
+      a_
+        ( [href_ target, class_ ("app-nav-link" <> if active then " active" else "")]
+            <> [makeAttribute "aria-current" "page" | active]
+        )
+        (toHtml caption)
+      where
+        active = mSection == Just sec
+
+    headerActions =
+      div_ [class_ "header-actions"] (connStatus <> fromMaybe mempty mHeaderActions)
+
+    -- Индикатор доступности сервера: опрашивает публичный /health.
+    -- /health отвечает 200 самим Muzlovar (без проверки Navidrome),
+    -- поэтому подпись говорит о сервере редактора, а не о Subsonic.
     connStatus =
       span_
         [ id_ "conn-status"
         , class_ "conn"
-        , makeAttribute "title" "Состояние подключения к проду"
+        , makeAttribute "title" "Доступность сервера Muzlovar (опрос /health)"
         ]
         ( span_ [class_ "conn-dot"] ""
-            <> span_ [id_ "conn-text"] "Прод: проверка…"
+            <> span_ [id_ "conn-text"] "Проверка…"
         )
-
-    settingsButton =
-      button_
-        [ id_ "settings-btn"
-        , type_ "button"
-        , class_ "icon-btn"
-        , makeAttribute "title" "Настройки"
-        , makeAttribute "aria-label" "Настройки"
-        , makeAttribute "aria-haspopup" "dialog"
-        ]
-        "\x2699\xFE0E"
 
     footerEl =
       if editorMode
@@ -123,31 +153,7 @@ layoutWith title mHeaderActions mainContent =
             "Muzlovar — редактор умных подборок Navidrome. Файлы .mix и .nsp \
             \хранятся на диске; база данных Navidrome не изменяется напрямую."
 
-    dialogs = deleteDialog <> overwriteDialog <> settingsDialog
-
-    settingsDialog =
-      dialog_
-        [id_ "settings-dialog"]
-        ( h3_ "Настройки"
-            <> nav_
-              [class_ "settings-nav"]
-              ( a_ [href_ "/"] "Подборки"
-                  <> a_ [href_ "/new"] "Новая подборка"
-                  <> a_ [href_ "/trash"] "Корзина"
-              )
-            <> p_
-              [class_ "settings-note"]
-              "Файлы .mix и .nsp хранятся на диске; база данных Navidrome \
-              \не изменяется напрямую. Статус в шапке отражает доступность сервера."
-            <> div_
-              [class_ "row"]
-              ( button_
-                  [ type_ "button"
-                  , makeAttribute "onclick" "document.getElementById('settings-dialog').close()"
-                  ]
-                  "Закрыть"
-              )
-        )
+    dialogs = deleteDialog <> overwriteDialog
 
     deleteDialog =
       dialog_
@@ -226,8 +232,9 @@ summaryEl = term "summary"
 -- | Главная страница: таблица всех @.mix@ и @.nsp@.
 indexPage :: [PlaylistEntry] -> Html ()
 indexPage entries =
-  layout
+  layoutWith (Just NavPlaylists)
     "Muzlovar — подборки"
+    Nothing
     ( div_
         [class_ "toolbar"]
         ( h2_ "Умные подборки"
@@ -281,7 +288,7 @@ indexPage entries =
             <> td_ [class_ "summary"] (toHtml (peSummary e))
             <> td_ status
             <> td_ (toHtml (formatModified (peModified e)))
-            <> td_ [class_ "actions"] actions
+            <> td_ [class_ "actions"] (div_ [class_ "actions-row"] actions)
         )
       where
         external = peStatus e == "external"
@@ -300,6 +307,9 @@ indexPage entries =
             , maybe mempty (\err -> br_ [] <> span_ [class_ "badge broken"] (toHtml err)) (peError e)
             ]
 
+        -- Кнопки живут во вложенном div.actions-row: td.actions должна
+        -- оставаться table-cell (flex прямо на ячейке выносит её из
+        -- сетки таблицы), а gap бокса держит кнопки на расстоянии.
         actions =
           mconcat
             [ a_ [href_ ("/edit/" <> peSlug e), class_ "btn"] "Открыть"
@@ -348,22 +358,43 @@ badge cls label = span_ ([class_ ("badge " <> cls)] <> [makeAttribute "hidden" "
 -- блоки в самом низу.
 editorPage :: Maybe Text -> Maybe FilePath -> FilePath -> Html ()
 editorPage mslug publishedPath publishDir =
-  layoutWith title (Just editorActions) workspace
+  layoutWith navSection title (Just editorActions) workspace
   where
     title = case mslug of
       Just s -> "Muzlovar — " <> s
       Nothing -> "Muzlovar — новая подборка"
 
-    -- Кнопки редактора живут в шапке (см. 'layoutWith').
+    -- Редактор существующей подборки — раздел «Подборки», свежий —
+    -- «Новая подборка»: подсветка следует за тем, откуда пришёл юзер.
+    navSection = case mslug of
+      Just _ -> Just NavPlaylists
+      Nothing -> Just NavNew
+
+    -- Кнопки редактора живут в шапке (см. 'layoutWith'). Опубликованная
+    -- подборка сохраняется той же identity («Сохранить изменения»), а её
+    -- рецепт можно сохранить копией в новую подборку — без прежних
+    -- identity и cleanup её файлов (см. muzlovar.js, publishAsNew).
+    -- Ручной кнопки «Проверить» нет: валидация запускается при любом
+    -- изменении рецепта, а публикация сначала перепроверяет модель.
     editorActions =
-      button_
-        [ id_ "e-save"
-        , type_ "button"
-        , class_ "btn"
-        , makeAttribute "title" "Проверить подборку"
-        ]
-        "Проверить"
-        <> button_ [id_ "e-publish", type_ "button", class_ "btn primary"] "Опубликовать"
+      button_ [id_ "e-publish", type_ "button", class_ "btn primary"] publishLabel
+        <> button_
+          ( [ id_ "e-publish-new"
+            , type_ "button"
+            , class_ "btn"
+            , makeAttribute "title" "Сохранить рецепт как новую подборку"
+            ]
+              <> [makeAttribute "hidden" "hidden" | not published]
+          )
+          "Сохранить как новую"
+
+    -- Для неопубликованной подборки основная кнопка публикует её
+    -- впервые; для опубликованной — обновляет существующую.
+    published = isJust publishedPath
+
+    publishLabel
+      | published = "Сохранить изменения"
+      | otherwise = "Опубликовать"
 
     workspace =
       div_
@@ -640,8 +671,9 @@ editorPage mslug publishedPath publishDir =
 -- | Страница корзины с восстановлением и окончательным удалением.
 trashPage :: [TrashEntry] -> Html ()
 trashPage entries =
-  layout
+  layoutWith (Just NavTrash)
     "Muzlovar — корзина"
+    Nothing
     ( div_ [class_ "toolbar"]
         ( h2_ "Корзина"
             <> spacer_
@@ -680,15 +712,18 @@ trashPage entries =
               )
             <> td_
               [class_ "actions"]
-              ( button_
-                  [type_ "button", makeAttribute "data-restore" (teId t)]
-                  "Восстановить"
-                  <> button_
-                    [ type_ "button"
-                    , class_ "danger small"
-                    , makeAttribute "data-purge" (teId t)
-                    ]
-                    "Удалить навсегда"
+              ( div_
+                  [class_ "actions-row"]
+                  ( button_
+                      [type_ "button", makeAttribute "data-restore" (teId t)]
+                      "Восстановить"
+                      <> button_
+                        [ type_ "button"
+                        , class_ "danger small"
+                        , makeAttribute "data-purge" (teId t)
+                        ]
+                        "Удалить навсегда"
+                  )
               )
         )
 

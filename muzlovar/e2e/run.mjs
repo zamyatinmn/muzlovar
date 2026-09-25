@@ -1,5 +1,8 @@
 // Headless E2E для Muzlovar: drag & drop ингредиентов из палитры
-// непосредственно в дерево правил (и перенос уже существующих условий).
+// непосредственно в дерево правил (и перенос уже существующих условий),
+// плюс layout-проверки: палитра ингредиентов, сетка таблицы подборок,
+// footer, header/навигация и ограничения поля «год»
+// (сценарии 12–20, свой url/viewport).
 //
 // Запуск:  node run.mjs      (или npm test)
 // Переменные:
@@ -35,8 +38,9 @@ const repoRoot = path.resolve(here, "..", "..");
 // Порядок корневых узлов важен для сценариев:
 //   0: любимое   1: год < 2010   2: вложенная группа «любое»   3: год < 2020
 // последний корневой узел — условие (сценарий «drop в конец»).
-// Ограничения «год» только верхние: дефолт палитры «год = 0» с ними
-// совместим, иначе валидация после drop чистила предпросмотр .mix.
+// Ограничения «год»: min=0, step=1, максимума нет (yearSpec в Fields.hs).
+// Сидовые значения ≥ 1990, дефолт палитры «год = 0» лежит на нижней
+// границе — валидация после drop не чистит предпросмотр .mix.
 const seedMix = `подборка "e2e-dnd"
 где все {
   любимое
@@ -48,6 +52,11 @@ const seedMix = `подборка "e2e-dnd"
   год < 2020
 }
 `;
+
+// Дополнительные подборки для layout-сценариев списка: столько строк,
+// чтобы контент гарантированно перерос низкое окно (иначе проверка
+// «footer не перекрывает последние строки» ничего не ловит).
+const seedLayoutCount = 6;
 
 // ---------------------------------------------------------------- helpers
 
@@ -251,6 +260,266 @@ async function dragHandleTo(page, handleSelector, point, midCheck) {
   if (!b) throw new Error("handle not visible: " + handleSelector);
   await doDrag(page, atCenter(b), point, midCheck);
 }
+
+// ---------------------------------------------------------------- layout
+
+// Геометрия таблицы подборок: сетка заголовка, строки с их ячейками и
+// колонка «Действия» с кнопками. null, если таблицы на странице нет.
+async function tableGrid(page) {
+  return page.evaluate(() => {
+    const table = document.querySelector("table.list");
+    if (!table) return null;
+    const rect = (e) => {
+      const r = e.getBoundingClientRect();
+      return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height };
+    };
+    const header = [...table.querySelectorAll("thead th")];
+    const headRow = table.querySelector("thead tr");
+    return {
+      table: rect(table),
+      headRow: rect(headRow),
+      header: header.map(rect),
+      headerDisplays: header.map((c) => getComputedStyle(c).display),
+      rows: [...table.querySelectorAll("tbody tr")].map((tr) => ({
+        box: rect(tr),
+        cells: [...tr.children].map(rect),
+        displays: [...tr.children].map((c) => getComputedStyle(c).display),
+        buttons: [...tr.querySelectorAll(".actions-row > *")].map((b) => ({
+          text: b.textContent.trim(),
+          ...rect(b),
+        })),
+      })),
+      doc: {
+        scrollW: document.documentElement.scrollWidth,
+        clientW: document.documentElement.clientWidth,
+      },
+    };
+  });
+}
+
+// Строки, разделители и колонка «Действия» согласованы: все ячейки —
+// table-cell, ширины колонок совпадают с заголовком, строки равны
+// ширине таблицы, кнопки разведены, документ не едет по горизонтали.
+function assertTableGrid(g, label) {
+  assert(g, label + ": таблица не найдена");
+  assert(g.rows.length > 0, label + ": нет строк");
+  assert(
+    g.headerDisplays.every((d) => d === "table-cell"),
+    label + ": ячейка заголовка не table-cell: " + JSON.stringify(g.headerDisplays),
+  );
+  g.rows.forEach((row, i) => {
+    assert(
+      row.displays.every((d) => d === "table-cell"),
+      label + ": строка " + i + " содержит не table-cell: " + JSON.stringify(row.displays),
+    );
+    assert(
+      row.cells.length === g.header.length,
+      label + ": в строке " + i + " " + row.cells.length + " ячеек, в заголовке " + g.header.length,
+    );
+    row.cells.forEach((c, j) => {
+      const dw = Math.abs(c.width - g.header[j].width);
+      assert(
+        dw < 1,
+        label + ": колонка " + j + " в строке " + i + " отличается от заголовка на " + dw.toFixed(2) + "px",
+      );
+    });
+    // Все строки таблицы (включая заголовочную) одной ширины. Сравниваем
+    // со строкой заголовка, а не с table.clientWidth: у border-collapse:
+    // separate браузер считает в клиентскую ширину ещё и внутренние
+    // разделители, из-за чего она расходится с геометрией строк на ~2px.
+    const dHead = Math.abs(row.box.width - g.headRow.width);
+    assert(
+      dHead < 1,
+      label + ": строка " + i + " не той ширины, что строка заголовка (Δ=" + dHead.toFixed(2) + "px)",
+    );
+    // Колонка «Действия» — внутри строки, без разрывов с ней.
+    const act = row.cells[row.cells.length - 1];
+    assert(
+      Math.abs(act.right - row.box.right) <= 1 && Math.abs(act.top - row.box.top) <= 1,
+      label + ": колонка «Действия» оторвалась от строки " + i + ": " +
+        JSON.stringify({ act, row: row.box }),
+    );
+    for (let k = 0; k + 1 < row.buttons.length; k++) {
+      const a = row.buttons[k];
+      const b = row.buttons[k + 1];
+      const gapX = b.left - a.right;
+      const gapY = b.top - a.bottom;
+      assert(
+        gapX >= 4 || gapY >= 4,
+        label + ": кнопки «" + a.text + "»/«" + b.text + "» слиплись (Δx=" +
+          gapX.toFixed(1) + ", Δy=" + gapY.toFixed(1) + ")",
+      );
+    }
+  });
+  assert(
+    g.doc.scrollW <= g.doc.clientW + 1,
+    label + ": документ прокручивается по горизонтали (" + g.doc.scrollW + " > " + g.doc.clientW + ")",
+  );
+}
+
+// Layout-сценарии: свой url/viewport, ожидания редактора из общего цикла
+// не нужны (ready — селектор, до которого ждём). Проверяют палитру
+// ингредиентов, сетку таблицы подборок и footer — без изменения данных
+// и поведения кнопок.
+const layoutScenarios = [
+  {
+    name: "12. палитра: колонка по высоте окна, список прокручивается",
+    url: "/edit/e2e-dnd",
+    ready: ".ing",
+    fn: async (page) => {
+      const info = await page.evaluate(async () => {
+        const col = document.querySelector(".col-left");
+        const body = document.querySelector("#e-palette.col-body");
+        const head = document.querySelector(".col-left .col-head");
+        const search = document.querySelector(".col-left .col-search");
+        const header = document.querySelector("header.app");
+        const rightBody = document.querySelector(".col-right .col-body");
+        const colFoot = document.querySelector(".col-foot");
+        const out = {
+          vh: window.innerHeight,
+          headerBottom: header.getBoundingClientRect().bottom,
+          colTop: col.getBoundingClientRect().top,
+          colBottom: col.getBoundingClientRect().bottom,
+          headTop: head.getBoundingClientRect().top,
+          searchTop: search.getBoundingClientRect().top,
+          groups: document.querySelectorAll(".ing-group").length,
+          cards: document.querySelectorAll(".ing").length,
+          scrollable: body.scrollHeight > body.clientHeight,
+          clipped: [],
+          footer: !!document.querySelector("footer.app"),
+          colFootOverlap: false,
+          colFootBottom: null,
+        };
+        // Группа не должна обрезаться: её содержимое целиком в её высоте.
+        document.querySelectorAll(".ing-group").forEach((g) => {
+          if (g.scrollHeight > g.clientHeight + 1) {
+            out.clipped.push(g.querySelector(".ing-group-name").textContent);
+          }
+        });
+        if (colFoot && rightBody) {
+          out.colFootOverlap =
+            rightBody.getBoundingClientRect().bottom > colFoot.getBoundingClientRect().top + 1;
+          out.colFootBottom = colFoot.getBoundingClientRect().bottom;
+        }
+        body.scrollTop = body.scrollHeight;
+        await new Promise((r) => setTimeout(r, 150));
+        const cards = document.querySelectorAll(".ing");
+        const last = cards[cards.length - 1].getBoundingClientRect();
+        const bb = body.getBoundingClientRect();
+        out.lastVisible = last.bottom <= bb.bottom + 1 && last.top >= bb.top - 1;
+        out.headStays = Math.abs(head.getBoundingClientRect().top - out.headTop) < 1;
+        out.searchStays = Math.abs(search.getBoundingClientRect().top - out.searchTop) < 1;
+        out.bodyBottom = bb.bottom;
+        return out;
+      });
+      const fields = await page.evaluate(async () => {
+        const res = await fetch("/api/schema");
+        const data = await res.json();
+        return data.fields.length;
+      });
+      assert(info.groups === 9, "групп ингредиентов не 9: " + info.groups);
+      assert(
+        info.cards === fields,
+        "в палитре " + info.cards + " ингредиентов, в схеме " + fields,
+      );
+      assert(
+        info.colTop >= info.headerBottom - 1,
+        "колонка ингредиентов залезла на шапку: " + info.colTop + " < " + info.headerBottom,
+      );
+      assert(
+        info.colBottom <= info.vh + 1,
+        "колонка ингредиентов ниже окна: " + info.colBottom + " > " + info.vh,
+      );
+      assert(info.scrollable, "список ингредиентов не прокручивается");
+      assert(info.clipped.length === 0, "обрезанные группы: " + info.clipped.join(", "));
+      assert(info.lastVisible, "последний ингредиент недоступен после прокрутки списка");
+      assert(
+        info.headStays && info.searchStays,
+        "заголовок или поиск уехали при прокрутке списка",
+      );
+      assert(
+        info.bodyBottom <= info.colBottom + 1,
+        "список вышел за нижнюю границу колонки: " + info.bodyBottom + " > " + info.colBottom,
+      );
+      assert(!info.footer, "в редакторе не должно быть footer");
+      assert(!info.colFootOverlap, "нижняя панель колонки перекрывает её содержимое");
+      if (info.colFootBottom !== null) {
+        assert(
+          info.colFootBottom <= info.vh + 1,
+          "нижняя панель колонки ниже окна: " + info.colFootBottom,
+        );
+      }
+    },
+  },
+  {
+    name: "13. палитра: группы сворачиваются, поиск работает",
+    url: "/edit/e2e-dnd",
+    ready: ".ing",
+    fn: async (page) => {
+      // Сворачиваем ту группу, где лежит «Год»: она должна показывать
+      // совпадения поиска, не теряя при этом состояние свёрнутости.
+      const idx = await page.evaluate(() => {
+        const groups = [...document.querySelectorAll(".ing-group")];
+        const hit = groups.findIndex((g) =>
+          [...g.querySelectorAll(".ing")].some((c) =>
+            c.querySelector(".ing-title").textContent.toLowerCase().includes("год"),
+          ),
+        );
+        return hit;
+      });
+      assert(idx >= 0, "нет группы с ингредиентом «Год»");
+      const group = page.locator(".ing-group").nth(idx);
+      const head = group.locator(".ing-group-head").first();
+      const list = group.locator(".ing-list").first();
+
+      await head.click();
+      assert(!(await list.isVisible()), "свёрнутая группа продолжает показывать список");
+      assert(
+        (await head.getAttribute("aria-expanded")) === "false",
+        "aria-expanded не false после сворачивания",
+      );
+
+      await page.fill("#e-search", "год");
+      const matched = await page.$$eval(".ing", (cards) =>
+        cards.filter((c) => !c.hidden).map((c) => c.querySelector(".ing-title").textContent.toLowerCase()),
+      );
+      assert(matched.length > 0, "поиск не нашёл ингредиентов");
+      assert(
+        matched.every((t) => t.includes("год")),
+        "поиск показал лишние ингредиенты: " + JSON.stringify(matched),
+      );
+      const hiddenGroups = await page.$$eval(".ing-group", (gs) => gs.filter((g) => g.hidden).length);
+      assert(hiddenGroups > 0, "группы без совпадений не скрыты");
+      assert(
+        await page.$eval("#e-palette", (b) => b.classList.contains("searching")),
+        "во время поиска не выставлен класс searching",
+      );
+      assert(await list.isVisible(), "совпадения в свёрнутой группе не показаны");
+
+      await page.fill("#e-search", "");
+      assert(
+        !(await page.$eval("#e-palette", (b) => b.classList.contains("searching"))),
+        "класс searching остался после очистки поиска",
+      );
+      assert(!(await list.isVisible()), "свёрнутая группа развернулась после поиска");
+      const visible = await page.$$eval(".ing", (cards) => cards.filter((c) => !c.hidden).length);
+      const total = await page.$$eval(".ing", (cards) => cards.length);
+      assert(visible === total, "после очистки поиска видно " + visible + " из " + total);
+      const shownGroups = await page.$$eval(".ing-group", (gs) => gs.filter((g) => !g.hidden).length);
+      assert(
+        shownGroups === await page.$$eval(".ing-group", (gs) => gs.length),
+        "после очистки поиска скрылись группы",
+      );
+
+      await head.click();
+      assert(await list.isVisible(), "развёрнутая группа не показывает список");
+      assert(
+        (await head.getAttribute("aria-expanded")) === "true",
+        "aria-expanded не true после разворачивания",
+      );
+    },
+  },
+];
 
 // ---------------------------------------------------------------- DOM state
 
@@ -664,9 +933,10 @@ const scenarios = [
       const last = await box(page, sel.children, 4);
       await dragFromPalette(page, "оценка", atBottom(last));
       mix = await waitFreshMix(page, mix);
-      await page.click("#e-save"); // «Проверить» — финальная валидация
-      // Успех — «ok» либо «warn»: предупреждения (избыточные условия
-      // и т. п.) не блокируют валидацию и не влияют на порядок узлов.
+      // Кнопки «Проверить» нет: предпросмотр .mix обновляется только
+      // ответом автоматической валидации — waitFreshMix выше как раз
+      // дождался её. Успех — «ok» либо «warn»: предупреждения (избыточные
+      // условия и т. п.) не блокируют валидацию и не влияют на порядок.
       await page.waitForFunction(
         () => {
           const c = (document.getElementById("e-validity") || {}).className || "";
@@ -718,6 +988,313 @@ const scenarios = [
   },
 ];
 
+// Таблица подборок и footer: сетка колонок, колонка «Действия» и то, что
+// подвал остаётся обычным элементом потока под прокручиваемым main.
+const pageLayoutScenarios = [
+  {
+    name: "14. список подборок: согласованная сетка таблицы",
+    url: "/",
+    ready: "table.list tbody tr",
+    fn: async (page) => {
+      const g = await tableGrid(page);
+      assertTableGrid(g, "широкий экран");
+      const info = await page.evaluate(() => {
+        const foot = document.querySelector("footer.app");
+        const rows = [...document.querySelectorAll("table.list tbody tr")];
+        const last = rows[rows.length - 1].getBoundingClientRect();
+        const f = foot.getBoundingClientRect();
+        return {
+          footPos: getComputedStyle(foot).position,
+          lastBottom: last.bottom,
+          footTop: f.top,
+          footBottom: f.bottom,
+          vh: window.innerHeight,
+        };
+      });
+      assert(info.footPos === "static", "footer должен быть в обычном потоке: " + info.footPos);
+      assert(
+        info.lastBottom <= info.footTop + 1,
+        "footer перекрывает последнюю строку: " + info.lastBottom + " > " + info.footTop,
+      );
+      assert(
+        info.footBottom <= info.vh + 1,
+        "footer ниже окна: " + info.footBottom + " > " + info.vh,
+      );
+    },
+  },
+  {
+    name: "15. список подборок: узкий экран без наезда и обрезания",
+    url: "/",
+    ready: "table.list tbody tr",
+    viewport: { width: 700, height: 800 },
+    fn: async (page) => {
+      const g = await tableGrid(page);
+      assertTableGrid(g, "узкий экран");
+      // Широкая таблица прокручивается внутри main, а не документом.
+      const reach = await page.evaluate(async () => {
+        const main = document.querySelector("main");
+        main.scrollLeft = main.scrollWidth;
+        await new Promise((r) => setTimeout(r, 150));
+        const cell = document.querySelector("table.list tbody tr .actions");
+        const r = cell.getBoundingClientRect();
+        const f = document.querySelector("footer.app").getBoundingClientRect();
+        return {
+          left: r.left,
+          right: r.right,
+          vw: window.innerWidth,
+          footRight: f.right,
+          scrollLeft: main.scrollLeft,
+        };
+      });
+      assert(
+        reach.right <= reach.vw + 1 && reach.left >= -1,
+        "колонка «Действия» недостижима на узком экране: " + JSON.stringify(reach),
+      );
+      assert(reach.footRight <= reach.vw + 1, "footer шире окна: " + reach.footRight);
+    },
+  },
+  {
+    name: "16. footer не перекрывает контент при низком окне",
+    url: "/",
+    ready: "table.list tbody tr",
+    viewport: { width: 1400, height: 460 },
+    fn: async (page) => {
+      const info = await page.evaluate(async () => {
+        const main = document.querySelector("main");
+        const foot = document.querySelector("footer.app");
+        const rows = [...document.querySelectorAll("table.list tbody tr")];
+        const scrollable = main.scrollHeight > main.clientHeight;
+        main.scrollTop = main.scrollHeight;
+        await new Promise((r) => setTimeout(r, 150));
+        const last = rows[rows.length - 1].getBoundingClientRect();
+        const f = foot.getBoundingClientRect();
+        const m = main.getBoundingClientRect();
+        return {
+          footPos: getComputedStyle(foot).position,
+          vh: window.innerHeight,
+          clientH: document.documentElement.clientHeight,
+          docScrollH: document.documentElement.scrollHeight,
+          scrollable,
+          mainBottom: m.bottom,
+          lastBottom: last.bottom,
+          lastTop: last.top,
+          lastVisible: last.bottom <= m.bottom + 1 && last.top >= m.top - 1,
+          footTop: f.top,
+          footBottom: f.bottom,
+        };
+      });
+      assert(info.footPos === "static", "footer должен быть в обычном потоке: " + info.footPos);
+      assert(info.scrollable, "контент не перерос низкое окно: проверка потеряла смысл");
+      assert(info.lastVisible, "последняя строка обрезана областью main: " + JSON.stringify(info));
+      assert(
+        info.footTop >= info.lastBottom - 1,
+        "footer перекрывает последнюю строку: " + info.lastBottom + " > " + info.footTop,
+      );
+      assert(
+        info.mainBottom <= info.footTop + 1,
+        "footer начинается выше конца main: " + info.mainBottom + " > " + info.footTop,
+      );
+      assert(
+        info.footBottom <= info.vh + 1,
+        "footer ниже окна: " + info.footBottom + " > " + info.vh,
+      );
+      assert(
+        info.docScrollH <= info.clientH + 1,
+        "документ прокручивается вместо main: " + info.docScrollH + " > " + info.clientH,
+      );
+    },
+  },
+];
+
+// Header, навигация и ограничения поля «год»: активный раздел на
+// index/edit/new/trash, отсутствие шестерёнки/«Настройки» и кнопки
+// «Проверить», узкий экран без горизонтального скролла документа,
+// min/step года в /api/schema и в input редактора, серверная
+// валидация граничных значений (−1 и 0).
+const headerScenarios = [
+  {
+    name: "17. header: активный раздел навигации на всех страницах",
+    url: "/",
+    ready: "table.list tbody tr",
+    fn: async (page) => {
+      const origin = new URL(page.url()).origin;
+      const checkNav = async (expectedHref, label) => {
+        await page.waitForSelector(".app-nav .app-nav-link", { timeout: 15000 });
+        const nav = await page.$$eval(".app-nav .app-nav-link", (els) =>
+          els.map((a) => ({
+            href: a.getAttribute("href"),
+            text: a.textContent.trim(),
+            active: a.classList.contains("active"),
+            current: a.getAttribute("aria-current"),
+          })),
+        );
+        assert(nav.length === 3, label + ": пунктов навигации " + nav.length + ": " + JSON.stringify(nav));
+        assert(
+          JSON.stringify(nav.map((n) => n.href)) === JSON.stringify(["/", "/new", "/trash"]),
+          label + ": ссылки nav не те: " + JSON.stringify(nav),
+        );
+        const act = nav.filter((n) => n.active);
+        assert(act.length === 1, label + ": активных пунктов " + act.length + ": " + JSON.stringify(nav));
+        assert(
+          act[0].href === expectedHref,
+          label + ": активен «" + act[0].text + "» (" + act[0].href + "), ожидался " + expectedHref,
+        );
+        assert(act[0].current === "page", label + ": у активного пункта нет aria-current=page");
+        for (const n of nav) {
+          if (n.active) continue;
+          assert(!n.current, label + ": неактивный «" + n.text + "» имеет aria-current=" + n.current);
+        }
+        const chrome = await page.evaluate(() => ({
+          settingsBtn: !!document.getElementById("settings-btn"),
+          settingsDialog: !!document.getElementById("settings-dialog"),
+          eSave: !!document.getElementById("e-save"),
+          checkBtn: [...document.querySelectorAll("button")].some(
+            (b) => b.textContent.trim() === "Проверить",
+          ),
+          settingsText: document.body.textContent.includes("Настройки"),
+        }));
+        assert(!chrome.settingsBtn, label + ": осталась шестерёнка #settings-btn");
+        assert(!chrome.settingsDialog, label + ": остался диалог #settings-dialog");
+        assert(!chrome.eSave, label + ": осталась кнопка #e-save");
+        assert(!chrome.checkBtn, label + ": осталась кнопка «Проверить»");
+        assert(!chrome.settingsText, label + ": текст «Настройки» остался в DOM");
+      };
+
+      await checkNav("/", "index");
+      await page.goto(origin + "/edit/e2e-dnd", { waitUntil: "networkidle" });
+      await page.waitForSelector(ing("год"), { timeout: 15000 });
+      await checkNav("/", "edit");
+      await page.goto(origin + "/new", { waitUntil: "networkidle" });
+      await page.waitForSelector(ing("год"), { timeout: 15000 });
+      await checkNav("/new", "new");
+      await page.goto(origin + "/trash", { waitUntil: "networkidle" });
+      await checkNav("/trash", "trash");
+
+      // Бейдж доступности: опрашивает /health самого Muzlovar
+      // (внутренних терминов и намёков на Navidrome в нём нет).
+      await page.waitForFunction(
+        () => (document.getElementById("conn-text") || {}).textContent === "Muzlovar доступен",
+        null,
+        { timeout: 10000 },
+      );
+      const title = await page.$eval("#conn-status", (e) => e.getAttribute("title") || "");
+      assert(title.includes("Muzlovar") && title.includes("/health"), "заголовок статуса: " + title);
+    },
+  },
+  {
+    name: "18. header на узком экране (700px): без горизонтального скролла",
+    url: "/",
+    ready: "table.list tbody tr",
+    viewport: { width: 700, height: 800 },
+    fn: async (page) => {
+      const origin = new URL(page.url()).origin;
+      const check = async (label) => {
+        const info = await page.evaluate(() => ({
+          scrollW: document.documentElement.scrollWidth,
+          clientW: document.documentElement.clientWidth,
+          links: [...document.querySelectorAll(".app-nav .app-nav-link")].map((a) => {
+            const r = a.getBoundingClientRect();
+            return { text: a.textContent.trim(), left: r.left, right: r.right, width: r.width };
+          }),
+        }));
+        assert(
+          info.scrollW <= info.clientW + 1,
+          label + ": документ прокручивается по горизонтали (" + info.scrollW + " > " + info.clientW + ")",
+        );
+        assert(info.links.length === 3, label + ": пунктов nav " + info.links.length);
+        for (const l of info.links) {
+          assert(l.width > 0, label + ": ссылка «" + l.text + "» нулевой ширины");
+          assert(
+            l.left >= -1 && l.right <= info.clientW + 1,
+            label + ": ссылка «" + l.text + "» за пределами окна: " + JSON.stringify(l),
+          );
+        }
+      };
+      await check("index");
+      await page.goto(origin + "/edit/e2e-dnd", { waitUntil: "networkidle" });
+      await page.waitForSelector(ing("год"), { timeout: 15000 });
+      await check("editor");
+      await page.goto(origin + "/trash", { waitUntil: "networkidle" });
+      await page.waitForSelector(".app-nav .app-nav-link", { timeout: 15000 });
+      await check("trash");
+    },
+  },
+  {
+    name: "19. год: /api/schema и input получают min=0, step=1, без max",
+    fn: async (page) => {
+      const schema = await page.evaluate(async () => {
+        const res = await fetch("/api/schema");
+        const data = await res.json();
+        const f = data.fields.find((x) => x.id === "год");
+        return f ? { min: f.min, max: f.max, step: f.step } : null;
+      });
+      assert(schema, "в /api/schema нет поля «год»");
+      assert(schema.min === 0, "schema.min года = " + JSON.stringify(schema.min));
+      assert(schema.step === 1, "schema.step года = " + JSON.stringify(schema.step));
+      assert(
+        schema.max === null || schema.max === undefined,
+        "schema.max года = " + JSON.stringify(schema.max),
+      );
+      const inputs = await page.$$eval(
+        '#e-tree .cond input[aria-label="Числовое значение"]',
+        (els) =>
+          els.map((i) => ({
+            min: i.getAttribute("min"),
+            max: i.getAttribute("max"),
+            step: i.getAttribute("step"),
+          })),
+      );
+      assert(inputs.length > 0, "в дереве нет числовых инпутов");
+      for (const i of inputs) {
+        assert(i.min === "0", "input min=" + JSON.stringify(i.min));
+        assert(i.step === "1", "input step=" + JSON.stringify(i.step));
+        assert(i.max === null, "input max=" + JSON.stringify(i.max) + " (не должен задаваться)");
+      }
+    },
+  },
+  {
+    name: "20. год: /api/validate отклоняет −1 (422) и принимает 0 (200)",
+    url: "/",
+    ready: "table.list tbody tr",
+    fn: async (page) => {
+      const probe = (value) =>
+        page.evaluate(async (v) => {
+          const dto = {
+            name: "e2e-год",
+            public: false,
+            root: { kind: "all", items: [{ type: "cond", field: "год", op: "eq", value: v }] },
+          };
+          const res = await fetch("/api/validate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(dto),
+          });
+          const body = await res.json().catch(() => ({}));
+          return { status: res.status, body };
+        }, value);
+      const bad = await probe(-1);
+      assert(
+        bad.status === 422,
+        "год=-1: статус " + bad.status + ", ожидался 422: " + JSON.stringify(bad.body),
+      );
+      const msg = JSON.stringify(bad.body);
+      assert(
+        msg.includes("год") && msg.includes("диапазона"),
+        "год=-1: неожиданное сообщение: " + msg,
+      );
+      const ok = await probe(0);
+      assert(
+        ok.status === 200,
+        "год=0: статус " + ok.status + ", ожидался 200: " + JSON.stringify(ok.body),
+      );
+      assert(ok.body && ok.body.ok === true, "год=0: ok !== true: " + JSON.stringify(ok.body));
+    },
+  },
+];
+
+// Все сценарии подряд: поведение редактора, затем layout-проверки.
+const allScenarios = [...scenarios, ...layoutScenarios, ...pageLayoutScenarios, ...headerScenarios];
+
 // ---------------------------------------------------------------- main
 
 async function main() {
@@ -751,6 +1328,15 @@ async function main() {
   const store = mkdtempSync(path.join(tmpdir(), "muzlovar-e2e-"));
   mkdirSync(path.join(store, "rules"), { recursive: true });
   writeFileSync(path.join(store, "rules", "e2e-dnd.mix"), seedMix, "utf8");
+  // Подборки для layout-сценариев списка: строк должно хватать, чтобы
+  // контент гарантированно перерос низкое окно.
+  for (let i = 1; i <= seedLayoutCount; i++) {
+    writeFileSync(
+      path.join(store, "rules", "layout-" + i + ".mix"),
+      'подборка "layout-' + i + '"\nгде все {\n  любимое\n}\n',
+      "utf8",
+    );
+  }
 
   // 3. free port + server
   const port = await new Promise((resolve, reject) => {
@@ -797,27 +1383,35 @@ async function main() {
     if (!chrome) throw new Error("chrome not found; set MUZLOVAR_E2E_CHROME");
     browser = await chromium.launch({ executablePath: chrome, headless: true });
 
-    for (const sc of scenarios) {
+    for (const sc of allScenarios) {
       if (serverDead) {
         console.error("[e2e] server dead, aborting");
         failed++;
         break;
       }
-      const context = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+      const context = await browser.newContext({
+        viewport: sc.viewport || { width: 1400, height: 900 },
+      });
       const page = await context.newPage();
       try {
-        await page.goto(base + "/edit/e2e-dnd", { waitUntil: "networkidle" });
-        await page.waitForSelector(sel.children, { timeout: 15000 });
-        await page.waitForSelector(ing("год"), { timeout: 15000 });
-        // Модель загружена и первый автотест валидации отработал.
-        await page.waitForFunction(
-          () => {
-            const p = document.getElementById("e-preview");
-            return p && p.textContent.includes("год < 1990");
-          },
-          null,
-          { timeout: 15000 },
-        );
+        await page.goto(base + (sc.url || "/edit/e2e-dnd"), { waitUntil: "networkidle" });
+        if (sc.ready) {
+          // Layout-сценарии ждут только свой селектор: им не нужны
+          // модель и предпросмотр редактора.
+          await page.waitForSelector(sc.ready, { timeout: 15000 });
+        } else {
+          await page.waitForSelector(sel.children, { timeout: 15000 });
+          await page.waitForSelector(ing("год"), { timeout: 15000 });
+          // Модель загружена и первый автотест валидации отработал.
+          await page.waitForFunction(
+            () => {
+              const p = document.getElementById("e-preview");
+              return p && p.textContent.includes("год < 1990");
+            },
+            null,
+            { timeout: 15000 },
+          );
+        }
         await sc.fn(page);
         console.log("  ✓ " + sc.name);
       } catch (e) {
@@ -849,8 +1443,8 @@ async function main() {
 
   console.log(
     failed === 0
-      ? "[e2e] ALL PASSED (" + scenarios.length + ")"
-      : "[e2e] FAILED: " + failed + " of " + scenarios.length,
+      ? "[e2e] ALL PASSED (" + allScenarios.length + ")"
+      : "[e2e] FAILED: " + failed + " of " + allScenarios.length,
   );
   process.exit(failed === 0 ? 0 : 1);
 }

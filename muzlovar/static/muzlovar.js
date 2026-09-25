@@ -1,8 +1,8 @@
 /* Muzlovar — визуальный редактор умных подборок Navidrome.
  *
- * Раскладка desktop: шапка (логотип, статус прода, настройки,
- * «Проверить», «Опубликовать») и три колонки на всю высоту —
- * ингредиенты (~22%), рецепт подборки (~50%) и предпросмотр (~28%).
+ * Раскладка desktop: шапка (логотип, навигация, доступность сервера,
+ * «Опубликовать») и три колонки на всю высоту — ингредиенты (~22%),
+ * рецепт подборки (~50%) и предпросмотр (~28%).
  *
  * Два принципа:
  *  1. Списки полей, операторов и групп ингредиентов приходят только
@@ -39,12 +39,12 @@
     [
       'editor', 'e-name', 'e-desc', 'e-public', 'e-limit',
       'e-status', 'e-palette', 'e-tree', 'e-sort', 'e-errors', 'e-preview', 'e-preview-nsp',
-      'e-preview-wrap', 'e-personal', 'e-save', 'e-publish', 'e-delete',
+      'e-preview-wrap', 'e-personal', 'e-publish', 'e-publish-new', 'e-delete',
       'e-mix', 'e-nsp', 'toasts',
       'e-search', 'e-rules', 'e-validity', 'e-validity-text',
       'e-path', 'e-copy-mix', 'e-copy-preview', 'e-copy-nsp',
       'pl-title', 'pl-meta', 'tab-rules', 'tab-mix',
-      'conn-status', 'conn-text', 'settings-btn', 'settings-dialog'
+      'conn-status', 'conn-text'
     ].forEach(function (id) { els[id] = document.getElementById(id); });
   }
 
@@ -152,7 +152,6 @@
 
   function initChrome() {
     initConnStatus();
-    initSettings();
     initTabs();
     bindCopy('e-copy-mix', function () { return els['e-mix'] ? els['e-mix'].value : ''; });
     bindCopy('e-copy-preview', function () {
@@ -163,7 +162,12 @@
     });
   }
 
-  /* Статус подключения к проду: опрашивает публичный /health. */
+  /* Доступность сервера: опрашивает публичный /health.
+   *
+   * Разбор: /health — это эндпоинт самого Muzlovar, он всегда
+   * отвечает 200 и НЕ проверяет Navidrome/Subsonic (см. routes в
+   * Server.hs). Бейдж поэтому называет сервер редактора: внутренний
+   * термин «Прод» и намёк на Navidrome тут были бы неверны. */
   function initConnStatus() {
     var box = els['conn-status'];
     if (!box) return;
@@ -171,11 +175,11 @@
     function setConn(ok) {
       box.className = 'conn ' + (ok ? 'ok' : 'down');
       if (els['conn-text']) {
-        els['conn-text'].textContent = ok ? 'Прод: подключено' : 'Прод: недоступно';
+        els['conn-text'].textContent = ok ? 'Muzlovar доступен' : 'Muzlovar недоступен';
       }
       box.title = ok
-        ? 'Сервер отвечает — прод доступен'
-        : 'Сервер не отвечает — проверьте подключение';
+        ? 'Сервер Muzlovar отвечает на /health — проверка каждые 30 с'
+        : 'Сервер Muzlovar не отвечает — обновите страницу позже';
     }
 
     function ping() {
@@ -186,15 +190,6 @@
 
     ping();
     setInterval(ping, 30000);
-  }
-
-  function initSettings() {
-    var btn = els['settings-btn'];
-    var dlg = els['settings-dialog'];
-    if (!btn || !dlg) return;
-    btn.addEventListener('click', function () {
-      if (typeof dlg.showModal === 'function') dlg.showModal();
-    });
   }
 
   function initTabs() {
@@ -633,7 +628,7 @@
   }
 
   function setActions(on) {
-    ['e-save', 'e-publish', 'e-delete'].forEach(function (id) {
+    ['e-publish', 'e-publish-new', 'e-delete'].forEach(function (id) {
       if (els[id]) els[id].disabled = !on;
     });
     var tree = els['e-tree'];
@@ -678,8 +673,19 @@
     }
 
     if (els['e-publish']) els['e-publish'].addEventListener('click', publish);
-    if (els['e-save']) els['e-save'].addEventListener('click', function () { scheduleValidate(0); });
+    if (els['e-publish-new']) els['e-publish-new'].addEventListener('click', publishAsNew);
     if (els['e-delete']) els['e-delete'].addEventListener('click', confirmDelete);
+    syncPublishButtons();
+  }
+
+  /* Подпись основной кнопки публикации и видимость «Сохранить как
+   * новую»: у неопубликованной подборки только «Опубликовать», у
+   * опубликованной — «Сохранить изменения» плюс сохранение копией. */
+  function syncPublishButtons() {
+    if (els['e-publish']) {
+      els['e-publish'].textContent = isPublished() ? 'Сохранить изменения' : 'Опубликовать';
+    }
+    if (els['e-publish-new']) els['e-publish-new'].hidden = !isPublished();
   }
 
   /* Путь публикации — только информация (кнопки и редактирования нет).
@@ -803,10 +809,23 @@
     order.forEach(function (b) {
       if (!b.fields.length) return;
       var section = el('div', { class: 'ing-group' });
-      section.appendChild(el('div', { class: 'ing-group-head' }, [
+      // Заголовок — кнопка сворачивания: палитра из 9 групп и 70+
+      // ингредиентов целиком помещается только в прокручиваемом списке,
+      // а сворачивание убирает из него лишние группы.
+      var head = el('button', {
+        type: 'button',
+        class: 'ing-group-head',
+        'aria-expanded': 'true'
+      }, [
+        el('span', { class: 'caret', 'aria-hidden': 'true' }),
         el('span', { class: 'ing-group-name', text: b.name }),
         el('span', { class: 'ing-group-count', text: String(b.fields.length) })
-      ]));
+      ]);
+      head.addEventListener('click', function () {
+        var collapsed = section.classList.toggle('collapsed');
+        head.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      });
+      section.appendChild(head);
       var list = el('div', { class: 'ing-list' });
       list.setAttribute('data-group-id', b.id);
       b.fields.forEach(function (f) { list.appendChild(ingredientCard(f)); });
@@ -869,6 +888,10 @@
     var box = els['e-palette'];
     if (!box) return;
     var q = (query || '').trim().toLowerCase();
+    // В режиме поиска совпадения показываются даже в свёрнутых группах
+    // (см. #e-palette.searching в muzlovar.css); состояние свёрнутости
+    // при этом сохраняется и возвращается после очистки поиска.
+    box.classList.toggle('searching', !!q);
     box.querySelectorAll('.ing').forEach(function (card) {
       var title = card.querySelector('.ing-title');
       var hit = !q || (title && title.textContent.toLowerCase().indexOf(q) >= 0);
@@ -1598,11 +1621,17 @@
     if (n && n.parentNode) n.parentNode.removeChild(n);
   }
 
-  /* Автопрокрутка колонки дерева, когда курсор у края. */
+  /* Автопрокрутка колонки дерева, когда курсор у края.
+   *
+   * Только когда курсор реально над колонкой: drag начинается на
+   * карточке палитры (она у нижнего края окна), и без проверки по X
+   * дерево прокручивалось на 14px при старте — цель вставки уезжала
+   * в другую группу. */
   function autoScroll(x, y) {
     var host = els['e-tree'] ? els['e-tree'].parentElement : null;
     if (!host) return;
     var r = host.getBoundingClientRect();
+    if (x < r.left || x > r.right) return;
     if (y < r.top + 28) host.scrollTop -= 14;
     else if (y > r.bottom - 28) host.scrollTop += 14;
   }
@@ -1733,6 +1762,11 @@
   /* Валидация и предпросмотр                                            */
   /* ------------------------------------------------------------------ */
 
+  /* Единственная точка запуска проверки: её вызывает ЛЮБОЕ изменение
+   * рецепта (поле, дерево, сортировка, лимит), поэтому статус, ошибки
+   * и предупреждения обновляются сами — ручная кнопка «Проверить»
+   * здесь не нужна. debounce: 400 мс набора текста, 0 — после
+   * структурных изменений. */
   function scheduleValidate(delay) {
     if (!schema) return;
     // Живое обновление вкладки «Правила»: локальный рендер не ждёт
@@ -1750,10 +1784,14 @@
     if (els['e-validity-text']) els['e-validity-text'].textContent = text;
   }
 
+  /* Один проход валидации. Возвращает Promise<bool> («модель
+   * валидна») и кладёт результат в lastValidateOk — его же читает
+   * публикация. */
   function runValidate() {
-    if (!model) return;
+    if (!model) return Promise.resolve(false);
+    validateTimer = null;
     setValidity('pending', 'Проверяем…');
-    api('/api/validate', { method: 'POST', body: model }).then(function (res) {
+    return api('/api/validate', { method: 'POST', body: model }).then(function (res) {
       var errs = errorsOf(res.data);
       var warns = (res.data && Array.isArray(res.data.warnings)) ? res.data.warnings : [];
       lastValidateOk = res.ok && !errs.length;
@@ -1789,12 +1827,27 @@
       } else {
         setValidity('err', 'Ошибки: ' + errs.length);
       }
+      return lastValidateOk;
     }).catch(function () {
       renderErrors(els['e-errors'],
         [{ message: 'Сервер недоступен — проверка не выполнена.' }], 'Ошибка');
       lastValidateOk = false;
       setValidity('err', 'Сервер недоступен');
+      return false;
     });
+  }
+
+  /* Свежий результат проверки перед публикацией: отложенный (debounce)
+   * запуск отменяется, валидация выполняется немедленно и её ответ
+   * решает, уходит ли запрос на сохранение. Пока debounce висит,
+   * lastValidateOk мог устареть относительно уже изменённой модели. */
+  function validatedNow() {
+    if (!schema || !model) return Promise.resolve(false);
+    if (validateTimer) {
+      clearTimeout(validateTimer);
+      validateTimer = null;
+    }
+    return runValidate();
   }
 
   /* ------------------------------------------------------------------ */
@@ -1802,27 +1855,49 @@
   /* ------------------------------------------------------------------ */
 
   function publish() {
-    // Публикация пишет на диск уже показанный результат последней
-    // успешной проверки; сервер при сохранении выполняет свою проверку.
-    if (!lastValidateOk) {
-      toast('error', 'Сначала исправьте ошибки валидации.');
-      return;
-    }
-    sendPublish(false);
+    // На диск уходит только то, что подтверждено актуальной проверкой;
+    // сервер при сохранении выполняет свою проверку независимо.
+    validatedNow().then(function (ok) {
+      if (!ok) {
+        toast('error', 'Сначала исправьте ошибки валидации.');
+        return;
+      }
+      sendPublish(false);
+    });
   }
 
-  function sendPublish(overwrite) {
-    var url = slug
-      ? '/api/playlists/' + encodeURIComponent(slug) + (overwrite ? '?overwrite=1' : '')
-      : '/api/playlists' + (overwrite ? '?overwrite=1' : '');
-    api(url, { method: slug ? 'PUT' : 'POST', body: model }).then(function (res) {
+  /* «Сохранить как новую»: текущий рецепт уходит в обычный create
+   * (POST без slug) — прежний identity и slug исходной подборки в
+   * запрос не попадают, её cleanup/rename не запускается. После
+   * успеха редактор переключается на identity новой подборки. */
+  function publishAsNew() {
+    validatedNow().then(function (ok) {
+      if (!ok) {
+        toast('error', 'Сначала исправьте ошибки валидации.');
+        return;
+      }
+      sendPublish(false, true);
+    });
+  }
+
+  function sendPublish(overwrite, asNew) {
+    // Как и раньше: обновление идёт по slug открытой подборки, create —
+    // без него. «Сохранить как новую» всегда идёт в create, даже когда
+    // открытая подборка уже опубликована.
+    var create = asNew || !slug;
+    var url = create
+      ? '/api/playlists' + (overwrite ? '?overwrite=1' : '')
+      : '/api/playlists/' + encodeURIComponent(slug) + (overwrite ? '?overwrite=1' : '');
+    api(url, { method: create ? 'POST' : 'PUT', body: model }).then(function (res) {
       if (res.ok) {
-        toast('ok', 'Подборка опубликована: ' + (res.data.entry ? res.data.entry.name : ''));
+        toast('ok', asNew
+          ? 'Сохранено как новая подборка: ' + (res.data.entry ? res.data.entry.name : '')
+          : 'Подборка опубликована: ' + (res.data.entry ? res.data.entry.name : ''));
         var entry = res.data.entry || null;
         var newSlug = entry ? entry.slug : slug;
         if (newSlug && newSlug !== slug) {
-          // Переименование: identity подборки и адрес страницы
-          // переезжают на новый filename.
+          // Переименование (и «Сохранить как новую»): identity подборки
+          // и адрес страницы переезжают на новый filename.
           slug = newSlug;
           if (els.editor) els.editor.setAttribute('data-slug', slug);
           window.history.replaceState({}, '', '/edit/' + encodeURIComponent(slug));
@@ -1842,6 +1917,7 @@
         }
         pendingSlug = slug;
         updatePath();
+        syncPublishButtons();
         return;
       }
       if (res.status === 409) {
@@ -1851,7 +1927,7 @@
           toast('error', 'Внешнюю подборку нельзя редактировать.');
           return;
         }
-        confirmOverwrite(e.message || 'Файлы уже существуют.');
+        confirmOverwrite(e.message || 'Файлы уже существуют.', asNew);
         return;
       }
       renderErrors(els['e-errors'], errorsOf(res.data), 'Не удалось опубликовать');
@@ -1861,7 +1937,7 @@
     });
   }
 
-  function confirmOverwrite(message) {
+  function confirmOverwrite(message, asNew) {
     var dlg = document.getElementById('overwrite-dialog');
     if (!dlg) { toast('warn', message); return; }
     document.getElementById('overwrite-text').textContent = message;
@@ -1870,7 +1946,7 @@
     else if (!window.confirm(message)) return;
     dlg.addEventListener('close', function handler() {
       dlg.removeEventListener('close', handler);
-      if (dlg.returnValue === 'yes') sendPublish(true);
+      if (dlg.returnValue === 'yes') sendPublish(true, asNew);
     });
   }
 

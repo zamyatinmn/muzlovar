@@ -1,6 +1,6 @@
 /* Muzlovar — тёмная графитовая тема, спокойная продуктовая плотность.
  *
- * Каркас: шапка (логотип, статус прода, настройки, «Проверить»,
+ * Каркас: шапка (логотип, навигация разделов, статус сервера,
  * «Опубликовать») и три колонки на всю высоту окна:
  * ингредиенты ~22% · рецепт ~50% · предпросмотр ~28%.
  *
@@ -106,8 +106,6 @@ button.primary:hover:not(:disabled) { background: #3a78ee; border-color: #3a78ee
 button.ghost { background: transparent; }
 button.small, .btn.small { height: var(--control-sm); padding: 0 11px; font-size: 13px; border-radius: var(--radius-xs); }
 button.wide, .btn.wide { width: 100%; height: 42px; }
-button.icon-btn { width: var(--control); padding: 0; font-size: 18px; color: var(--fg-dim); border-color: transparent; background: transparent; }
-button.icon-btn:hover { color: var(--fg); background: var(--bg-hover); }
 
 /* Destructive: красный читается, но не кричит без необходимости. */
 button.danger, .btn.danger {
@@ -190,6 +188,10 @@ header.app {
   top: 0;
   z-index: 5;
   flex: 0 0 auto;
+  /* Тесно — строка переносится, а не сжимается и не расширяет
+   * документ по горизонтали (см. также @media ниже). */
+  flex-wrap: wrap;
+  row-gap: 8px;
 }
 
 .brand {
@@ -207,7 +209,47 @@ header.app {
 .brand .logo { font-size: 18px; font-weight: 700; letter-spacing: .01em; }
 .brand .subtitle { font-size: 13px; color: var(--fg-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-.header-actions { display: flex; align-items: center; gap: 12px; margin-left: auto; }
+/* Навигация разделов в шапке: три ссылки, активная подсвечена фоном
+ * и рамкой (класс active + aria-current ставит серверная разметка).
+ * Своего min-width:0 у блока нет: автоматический минимум равен самой
+ * широкой ссылке, поэтому в тесноте пункты переносятся строками, а не
+ * вылезают за пределы документа. */
+.app-nav {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.app-nav-link {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 12px;
+  font-size: 13.5px;
+  color: var(--fg-dim);
+  text-decoration: none;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.app-nav-link:hover { color: var(--fg); background: var(--bg-hover); }
+.app-nav-link.active {
+  color: var(--fg);
+  font-weight: 600;
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg-raised));
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-left: auto;
+}
+/* Элементы шапки не сжимаются текстом вдвое — им лучше перенестись. */
+.header-actions > * { flex: 0 0 auto; }
 
 .conn {
   display: inline-flex;
@@ -228,10 +270,22 @@ header.app {
 .conn.down { color: var(--danger-text); border-color: color-mix(in srgb, var(--danger) 45%, var(--line)); }
 .conn.down .conn-dot { background: var(--danger); }
 
+/* Узкое окно: подзаголовок уходит первым (он и так с ellipsis),
+ * логотип больше не сжимается, а шапка складывается строками. */
+@media (max-width: 900px) {
+  .brand { flex: 0 0 auto; }
+  .brand .subtitle { display: none; }
+}
+
 /* ------------------------------------------------------------------ */
 /* Макет страницы                                                      */
 /* ------------------------------------------------------------------ */
 
+/* main — скролл-контейнер страницы: длинный контент прокручивается
+ * внутри него, footer остаётся обычным элементом потока под main и
+ * физически не может перекрыть последние строки таблицы — независимо
+ * от высоты окна. Благодаря min-height:0/overflow у колонок редактора
+ * прокручиваются сами, а не страница. */
 main {
   flex: 1 1 auto;
   min-height: 0;
@@ -239,9 +293,10 @@ main {
   max-width: 1360px;
   margin: 0 auto;
   padding: 24px;
+  overflow: auto;
 }
-/* Редактор: колонки занимают всю высоту окна. */
-main.main-full { max-width: none; padding: 14px; display: flex; }
+/* Редактор: колонки занимают всю высоту окна, скролл — внутри колонок. */
+main.main-full { max-width: none; padding: 14px; display: flex; overflow: hidden; }
 
 .workspace {
   flex: 1 1 auto;
@@ -333,7 +388,9 @@ main.main-full { max-width: none; padding: 14px; display: flex; }
 .result-row input[type="number"] { width: 13ch; }
 
 @media (max-width: 1180px) {
-  main.main-full { display: block; overflow: visible; }
+  /* Колонки редактора складываются в стопку: main становится обычным
+   * вертикальным скролл-контейнером вместо трёх независимых колонок. */
+  main.main-full { display: block; overflow: auto; }
   .workspace { display: flex; flex-direction: column; }
   .col { min-height: 340px; }
 }
@@ -346,22 +403,44 @@ main.main-full { max-width: none; padding: 14px; display: flex; }
   border-radius: var(--radius-sm);
   background: var(--bg-raised);
   overflow: hidden;
+  /* Группа — flex-элемент вертикального списка: без явного запрета на
+   * сжатие браузер ужимает её до высоты колонки (overflow: hidden даёт
+   * min-height: 0) и обрезает ингредиенты вместо прокрутки списка. */
+  flex: 0 0 auto;
 }
+/* Заголовок — кнопка сворачивания группы: вся строка кликабельна,
+ * состояние читается по aria-expanded и по повороту шеврона. */
 .ing-group-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  gap: 7px;
+  width: 100%;
+  height: auto;
   padding: 11px 12px 7px;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  white-space: normal;
+  cursor: pointer;
 }
+.ing-group-head:hover { background: var(--bg-hover); }
+.ing-group-head .caret { margin-right: 3px; }
+.ing-group:not(.collapsed) .ing-group-head .caret { transform: rotate(45deg); }
 .ing-group-name {
   font-size: 13px;
   font-weight: 650;
   color: var(--fg-dim);
 }
-.ing-group-count { font-size: 12px; color: var(--fg-faint); }
+.ing-group-count { margin-left: auto; font-size: 12px; color: var(--fg-faint); }
 
 .ing-list { display: flex; flex-direction: column; gap: 5px; padding: 0 8px 8px; }
+.ing-group.collapsed .ing-list { display: none; }
+/* Поиск всегда показывает совпадения, даже в свёрнутой группе:
+ * состояние свёрнутости при этом не сбрасывается. */
+#e-palette.searching .ing-group.collapsed .ing-list { display: flex; }
 
 .ing {
   display: flex;
@@ -872,7 +951,21 @@ pre.code:empty { display: none; }
 .toolbar h2 { margin: 0; font-size: 20px; }
 .toolbar .spacer { flex: 1; }
 
-table.list { width: 100%; border-collapse: collapse; background: var(--bg-soft); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+/* Таблица подборок и корзины.
+ *
+ * border-collapse: separate + border-spacing: 0: строки, заголовок и
+ * разделители считаются по одной сетке (у collapse фон строк и углы
+ * карточки расходятся с рамкой), а ячейка «Действия» остаётся обычным
+ * table-cell — раньше display:flex на td превращал её в анонимную
+ * колонку и колонка «отрывалась» от строки. */
+table.list {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  background: var(--bg-soft);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
 table.list th, table.list td {
   text-align: left;
   padding: 11px 14px;
@@ -882,11 +975,20 @@ table.list th, table.list td {
 table.list th { color: var(--fg-dim); font-weight: 600; font-size: 13px; background: var(--bg-raised); }
 table.list tr:last-child td { border-bottom: none; }
 table.list tr:hover td { background: var(--bg-raised); }
+/* Скруглённые углы карточки: при отдельных границах их задают первая и
+ * последняя ячейки — таблица не умеет обрезать фон своих строк. */
+table.list thead th:first-child { border-top-left-radius: var(--radius); }
+table.list thead th:last-child { border-top-right-radius: var(--radius); }
+table.list tbody tr:last-child td:first-child { border-bottom-left-radius: var(--radius); }
+table.list tbody tr:last-child td:last-child { border-bottom-right-radius: var(--radius); }
 table.list .title { font-weight: 600; }
 table.list .file { font-family: var(--mono); font-size: 13px; color: var(--fg-dim); }
 table.list .summary { color: var(--fg-dim); font-size: 13.5px; max-width: 42ch; }
 table.list .desc { color: var(--fg-dim); font-size: 13.5px; }
-table.list .actions { white-space: nowrap; display: flex; gap: 6px; flex-wrap: wrap; }
+table.list .actions { white-space: nowrap; }
+/* Кнопки — во вложенном flex-боксе: gap держит «Открыть» и «Удалить»
+ * на расстоянии, а ячейка остаётся table-cell и участвует в сетке строки. */
+table.list .actions-row { display: flex; flex-wrap: wrap; gap: 6px; }
 table.list .actions .btn { height: 32px; padding: 0 11px; font-size: 13px; }
 
 .meta-line { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 13.5px; color: var(--fg-dim); }
@@ -930,20 +1032,6 @@ dialog .confirm-name {
   margin: 8px 0;
   user-select: all;
 }
-.settings-nav { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 14px; }
-.settings-nav a {
-  display: block;
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-xs);
-  background: var(--bg-raised);
-  color: var(--fg);
-  text-decoration: none;
-  font-size: 14px;
-}
-.settings-nav a:hover { border-color: var(--accent); background: var(--bg-hover); }
-.settings-note { margin: 0; font-size: 13px; color: var(--fg-faint); }
-
 #toasts {
   position: fixed;
   right: 18px;

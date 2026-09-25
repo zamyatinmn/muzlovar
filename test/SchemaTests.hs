@@ -309,8 +309,8 @@ schemaStructure = testCase "структура /api/schema" $ case schemaJson of
                 else Nothing
             )
     -- ограничения числовых полей совпадают с валидацией ядра:
-    -- рейтинги 0..5 шаг 1, счётчики/размеры ≥ 0 шаг 1, длительности
-    -- ≥ 0 без шага, годы и идентификаторы без границ
+    -- рейтинги 0..5 шаг 1, счётчики/размеры/год ≥ 0 шаг 1, длительности
+    -- ≥ 0 без шага, остальные годы/идентификаторы без границ
     fieldKey "min" (fieldObj fields "оценка") @?= toJSON (0 :: Integer)
     fieldKey "max" (fieldObj fields "оценка") @?= toJSON (5 :: Integer)
     fieldKey "step" (fieldObj fields "оценка") @?= toJSON (1 :: Integer)
@@ -324,8 +324,7 @@ schemaStructure = testCase "структура /api/schema" $ case schemaJson of
     fieldKey "step" (fieldObj fields "размер") @?= toJSON (1 :: Integer)
     fieldKey "min" (fieldObj fields "длительность") @?= toJSON (0 :: Integer)
     fieldKey "step" (fieldObj fields "длительность") @?= Null
-    fieldKey "min" (fieldObj fields "год") @?= Null
-    fieldKey "max" (fieldObj fields "год") @?= Null
+    -- «Год»: min=0, step=1, max не задан (см. 'yearConstraints')
     fieldKey "min" (fieldObj fields "библиотека") @?= Null
     -- названия полей заполнены
     forM_ fields $ \f ->
@@ -488,6 +487,46 @@ validationMessages =
         "invalid_tree"
     ]
 
+-- | Компиляция DTO должна пройти (путь редактора: POST /api/validate).
+okTest :: TestName -> PlaylistDto -> TestTree
+okTest name dto = testCase name $ case compilePlaylistDto dto of
+  Right _ -> pure ()
+  Left es ->
+    assertFailure ("ожидался успех компиляции, получено: " <> show (map aeMessage es))
+
+-- | Regression: отрицательный год отклоняется ядром независимо от UI.
+--
+-- Цепочка одна на всех: реестр ('Nspeller.Fields.yearSpec', min=0,
+-- step=1) → 'fieldNumConstraints' → валидация и @/api/schema@, откуда
+-- min/step уходят в атрибуты input и clamp редактора. Здесь проверяется
+-- серверная половина: DTO с @год = -1@ не компилируется, @год = 0@ —
+-- граничное допустимое значение, а схема отдаёт UI ровно min=0/step=1.
+yearConstraints :: TestTree
+yearConstraints =
+  testGroup
+    "Ограничения поля «Год»"
+    [ msgTest
+        "год = -1 → ошибка валидации"
+        (probeDto "год" "eq" (Just (Number (-1))))
+        "вне допустимого диапазона поля «год»: не меньше 0"
+    , msgTest
+        "год < 0 → условие не может выполняться"
+        (probeDto "год" "lt" (Just (Number 0)))
+        "Условие не может выполняться"
+    , msgTest
+        "год между -5 и 10 → диапазон выходит за границы"
+        (probeDto "год" "between" (Just (toJSON [-5 :: Integer, 10])))
+        "выходит за допустимые границы"
+    , okTest
+        "год = 0 → допустим"
+        (probeDto "год" "eq" (Just (Number 0)))
+    , testCase "schema: UI получает min=0 и step=1 без max" $ do
+        let f = fieldObj (arrayAt "fields" schemaJson) "год"
+        fieldKey "min" f @?= toJSON (0 :: Integer)
+        fieldKey "step" f @?= toJSON (1 :: Integer)
+        fieldKey "max" f @?= Null
+    ]
+
 ------------------------------------------------------------------------------
 -- Итоговый набор
 ------------------------------------------------------------------------------
@@ -499,4 +538,5 @@ schemaTests =
     [ schemaStructure
     , schemaValidationAgreement
     , validationMessages
+    , yearConstraints
     ]
