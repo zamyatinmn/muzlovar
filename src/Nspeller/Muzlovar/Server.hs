@@ -353,6 +353,8 @@ routes cfg = do
     serveBytes "text/css; charset=utf-8" Assets.muzlovarCss
   get "/static/muzlovar.js" $
     serveBytes "application/javascript; charset=utf-8" Assets.muzlovarJs
+  get "/static/i18n.js" $
+    serveBytes "application/javascript; charset=utf-8" Assets.muzlovarI18n
   get "/static/logo.png" $
     serveBytes "image/png" Assets.logoPng
   get "/static/favicon.ico" $

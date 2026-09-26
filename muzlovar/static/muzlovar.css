@@ -254,6 +254,13 @@ header.app {
 }
 /* Элементы шапки не сжимаются текстом вдвое — им лучше перенестись. */
 .header-actions > * { flex: 0 0 auto; }
+.header-actions .locale-switch {
+  height: 32px;
+  max-width: 110px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 13px;
+}
 
 /* Узкое окно: подзаголовок уходит первым (он и так с ellipsis),
  * логотип больше не сжимается, а шапка складывается строками. */

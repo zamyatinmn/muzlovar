@@ -10,7 +10,7 @@ Muzlovar lets you build complex [Navidrome smart playlists](https://www.navidrom
 
 The browser edits a DTO; it does not contain a second playlist compiler. Muzlovar's server and the bundled **Nspeller** CLI both use the same Haskell field registry, typed AST, validation rules, renderer, and Navidrome model.
 
-**Language:** The Muzlovar web UI currently uses Russian, and the Nspeller playlist DSL uses Russian syntax. English UI localization is not implemented yet; the screenshot below shows the current interface.
+**Language:** The Muzlovar web UI supports Russian and English. Choose the interface language in the header; the browser saves your choice locally. Nspeller playlist DSL syntax remains Russian. The screenshot below shows the Russian interface.
 
 ## Highlights
 
@@ -135,7 +135,7 @@ Release tags matching `vX.Y.Z` publish images for `linux/amd64`. A tag such as `
 
 ## Nspeller: the compiler behind Muzlovar
 
-Nspeller turns the human-readable `.mix` DSL into Navidrome `.nsp` JSON. The DSL keywords are intentionally Russian; an English grammar or translated UI is not currently implemented. Files are UTF-8 and may contain `#` line comments.
+Nspeller turns the human-readable `.mix` DSL into Navidrome `.nsp` JSON. The DSL keywords remain Russian regardless of the Web UI language. Files are UTF-8 and may contain `#` line comments.
 
 ```text
 подборка "Forgotten favourites"
@@ -243,7 +243,7 @@ Set `MUZLOVAR_E2E_CHROME` to a browser executable when it cannot be discovered a
 
 - Muzlovar is file-backed; it has no application database or file watcher.
 - Subsonic integration only looks up playlists and deletes a playlist entity. Creation and updates happen by writing `.nsp` files for Navidrome to scan.
-- The UI, DSL keywords, and application error messages are Russian-only.
+- The Nspeller DSL and server diagnostic messages remain Russian. Muzlovar localizes its interface to Russian and English; unknown server diagnostics are shown as received.
 - There is no music-file analysis, recommendation engine, ML, Android integration, or recursive `build-all`.
 - `limitPercent`, general negation, list operands, and arbitrary custom Navidrome fields are not supported.
 - External NSP trees containing nodes that cannot be represented by the DSL are read-only.

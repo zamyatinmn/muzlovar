@@ -53,6 +53,13 @@ const seedMix = `подборка "e2e-dnd"
 }
 `;
 
+const seedRelativeMix = `подборка "e2e-relative"
+где все {
+  добавлено за 30 дней
+  изменено не за 30 дней
+}
+`;
+
 // Дополнительные подборки для layout-сценариев списка: столько строк,
 // чтобы контент гарантированно перерос низкое окно (иначе проверка
 // «footer не перекрывает последние строки» ничего не ловит).
@@ -530,7 +537,7 @@ function rootShape(page) {
       const g = li.querySelector(":scope > .group");
       if (g) return "group";
       const f = li.querySelector(":scope > .cond select.field-sel");
-      const o = li.querySelector(':scope > .cond select[aria-label="Оператор"]');
+      const o = li.querySelector(':scope > .cond select[data-role="operator"]');
       return "cond:" + (f ? f.value : "?") + ":" + (o ? o.value : "?");
     }),
   );
@@ -540,7 +547,7 @@ function nestedShape(page) {
   return page.$$eval(sel.nestedChildren, (els) =>
     els.map((li) => {
       const f = li.querySelector(":scope > .cond select.field-sel");
-      const o = li.querySelector(':scope > .cond select[aria-label="Оператор"]');
+      const o = li.querySelector(':scope > .cond select[data-role="operator"]');
       return "cond:" + (f ? f.value : "?") + ":" + (o ? o.value : "?");
     }),
   );
@@ -558,10 +565,10 @@ function domLeaves(page) {
       .filter((c) => c.querySelector("select.field-sel"))
       .map((c) => {
         const fsel = c.querySelector("select.field-sel");
-        const osel = c.querySelector('select[aria-label="Оператор"]');
-        const num = c.querySelector('input[aria-label="Числовое значение"]');
-        const txt = c.querySelector('input[aria-label="Текстовое значение"]');
-        const bool = c.querySelector('select[aria-label="Значение"]');
+        const osel = c.querySelector('select[data-role="operator"]');
+        const num = c.querySelector('input[data-role="number-value"]');
+        const txt = c.querySelector('input[data-role="text-value"]');
+        const bool = c.querySelector('select[data-role="boolean-value"]');
         let val = "";
         if (num) val = num.value;
         else if (txt) val = txt.value;
@@ -1277,7 +1284,7 @@ const headerScenarios = [
         "schema.max года = " + JSON.stringify(schema.max),
       );
       const inputs = await page.$$eval(
-        '#e-tree .cond input[aria-label="Числовое значение"]',
+        '#e-tree .cond input[data-role="number-value"]',
         (els) =>
           els.map((i) => ({
             min: i.getAttribute("min"),
@@ -1380,11 +1387,11 @@ const headerScenarios = [
         nestedField === "год",
         "вложенный узел 2 не «год»: " + nestedField,
       );
-      await page.click(nestedSecond + ' button[aria-label="Удалить условие"]');
+      await page.click(nestedSecond + ' button[data-role="remove-condition"]');
 
       const second = sel.children + ":nth-child(2)";
-      await page.selectOption(second + ' select[aria-label="Оператор"]', "gt");
-      await page.fill(second + ' input[aria-label="Числовое значение"]', "2010");
+      await page.selectOption(second + ' select[data-role="operator"]', "gt");
+      await page.fill(second + ' input[data-role="number-value"]', "2010");
 
       // Дерево: оба условия на месте и независимы.
       const shape = await rootShape(page);
@@ -1402,7 +1409,7 @@ const headerScenarios = [
       assert(new Set(ids).size === ids.length, "дубликаты id в корне: " + ids);
       const values = await page.$$eval(sel.children, (els) =>
         els.map((li) => {
-          const i = li.querySelector('input[aria-label="Числовое значение"]');
+          const i = li.querySelector('input[data-role="number-value"]');
           return i ? i.value : null;
         }),
       );
@@ -1485,7 +1492,120 @@ const headerScenarios = [
 ];
 
 // Все сценарии подряд: поведение редактора, затем layout-проверки.
-const allScenarios = [...scenarios, ...layoutScenarios, ...pageLayoutScenarios, ...headerScenarios];
+const localeScenarios = [
+  {
+    name: '22. browser locale, language selection, persistence, and DSL identity',
+    url: '/edit/e2e-dnd',
+    ready: '#e-tree .group-root',
+    locale: 'en-US',
+    storedLocale: null,
+    fn: async (page) => {
+      assert(await page.$eval('html', (e) => e.lang) === 'en', 'English browser default');
+      assert(await page.$eval('#ui-locale', (e) => e.value) === 'en', 'English switcher default');
+      assert(await page.$eval('.app-nav a:first-child', (e) => e.textContent) === 'Playlists', 'English navigation');
+      assert(await page.$eval('.ing[data-chip-field="год"] .ing-title', (e) => e.textContent) === 'Year', 'English schema label');
+      await page.waitForFunction(() => document.getElementById('e-preview').textContent.length > 0 && document.getElementById('e-preview-nsp').textContent.length > 0);
+      const before = await page.$eval('#e-preview', (e) => e.textContent);
+      const beforeNsp = await page.$eval('#e-preview-nsp', (e) => e.textContent);
+      const name = await page.$eval('#e-name', (e) => e.value);
+      await page.selectOption('#ui-locale', 'ru');
+      assert(await page.$eval('html', (e) => e.lang) === 'ru', 'Russian selection');
+      assert(await page.$eval('.app-nav a:first-child', (e) => e.textContent) === 'Подборки', 'Russian navigation');
+      assert(await page.$eval('#e-name', (e) => e.value) === name, 'editor input retained');
+      await page.waitForFunction(() => document.getElementById('e-preview').textContent.length > 0);
+      assert(Buffer.from(await page.$eval('#e-preview', (e) => e.textContent)).equals(Buffer.from(before)), '.mix changed with locale');
+      assert(Buffer.from(await page.$eval('#e-preview-nsp', (e) => e.textContent)).equals(Buffer.from(beforeNsp)), '.nsp changed with locale');
+      await page.reload({waitUntil:'networkidle'});
+      assert(await page.$eval('#ui-locale', (e) => e.value) === 'ru', 'saved selection not restored');
+      await page.selectOption('#ui-locale', 'en');
+      assert(await page.$eval('.app-nav a:first-child', (e) => e.textContent) === 'Playlists', 'English selection');
+      const checks = await page.evaluate(() => {
+        const m = window.MuzlovarI18n;
+        const old = m.messages.en['list.heading'];
+        delete m.messages.en['list.heading'];
+        const fallback = m.t('list.heading');
+        m.messages.en['list.heading'] = old;
+        return {unknown: m.normalize('de-DE'), fallback, param:m.t('message.published',{name:'My mix'})};
+      });
+      assert(checks.unknown === 'en', 'unknown locale fallback');
+      assert(checks.fallback === 'Умные подборки', 'missing translation fallback');
+      assert(checks.param === 'Playlist published: My mix', 'parameterized message');
+      await page.fill('#e-name', '');
+      await page.waitForFunction(() => (document.getElementById('e-errors') || {}).textContent?.includes('Playlist name is required.'));
+      await page.fill('#e-name', name);
+    },
+  },
+  {
+    name: '23. Russian browser default', url: '/', ready: '.app-nav', locale: 'ru-RU', storedLocale: null,
+    fn: async (page) => {
+      assert(await page.$eval('#ui-locale', (e) => e.value) === 'ru', 'Russian browser default');
+      assert(await page.$eval('.app-nav a:first-child', (e) => e.textContent) === 'Подборки', 'Russian UI');
+    },
+  },
+  {
+    name: '24. English playlist list and Trash', url: '/', ready: 'table.list tbody tr', locale: 'en-US', storedLocale: null,
+    fn: async (page) => {
+      assert(await page.$eval('.toolbar h2', (e) => e.textContent) === 'Smart playlists', 'English list heading');
+      await page.waitForFunction(() => {
+        const row = document.querySelector('tr[data-playlist-slug="e2e-dnd"]');
+        return row && row.querySelectorAll('td')[5].textContent.includes('ALL');
+      });
+      const row = await page.$eval('tr[data-playlist-slug="e2e-dnd"]', (e) => e.textContent);
+      assert(row.includes('ALL'), 'English condition tree');
+      await page.goto(new URL('/trash', page.url()).href, {waitUntil:'networkidle'});
+      assert(await page.$eval('.toolbar h2', (e) => e.textContent) === 'Trash', 'English Trash heading');
+      const empty = await page.$eval('.state.empty', (e) => e.textContent);
+      assert(empty.includes('Trash is empty'), 'English empty state');
+    },
+  },
+  {
+    name: '25. relative days in ru/en and byte-identical DSL',
+    url: '/edit/e2e-relative', ready: '#e-rules .vcond', locale: 'en-US', storedLocale: null, relativeSeed: true,
+    fn: async (page) => {
+      await page.waitForFunction(() => document.getElementById('e-preview').textContent.length > 0 && document.getElementById('e-preview-nsp').textContent.length > 0);
+      const enRows = await page.$$eval('#e-rules .vcond', (rows) => rows.map((row) => row.textContent));
+      assert(enRows.some((row) => row.includes('within 30 days')), 'English inTheLast rendering: ' + enRows);
+      assert(enRows.some((row) => row.includes('not within 30 days')), 'English notInTheLast rendering: ' + enRows);
+      assert(enRows.every((row) => !row.includes('N days') && !/30 d\b/.test(row)), 'English day value duplicated: ' + enRows);
+      const labels = await page.$$eval('#e-tree select[data-role="operator"]', (selects) => selects.map((select) => {
+        const option = select.querySelector('option[value="notInTheLast"]');
+        return option && {text: option.textContent, hint: option.title};
+      }).filter(Boolean));
+      assert(labels.some((item) => item.text === 'not within N days' && item.hint.includes('date is not within the last N days')), 'notInTheLast label or hint: ' + JSON.stringify(labels));
+      const beforeMix = Buffer.from(await page.$eval('#e-preview', (e) => e.textContent));
+      const beforeNsp = Buffer.from(await page.$eval('#e-preview-nsp', (e) => e.textContent));
+      await page.selectOption('#ui-locale', 'ru');
+      const ruRows = await page.$$eval('#e-rules .vcond', (rows) => rows.map((row) => row.textContent));
+      assert(ruRows.some((row) => row.includes('за 30 дней')), 'Russian inTheLast rendering: ' + ruRows);
+      assert(ruRows.some((row) => row.includes('не звучало 30 дней') || row.includes('не за 30 дней')), 'Russian notInTheLast rendering: ' + ruRows);
+      assert(ruRows.every((row) => !row.includes('N дней') && !row.includes('30 дн.')), 'Russian day value duplicated: ' + ruRows);
+      assert(Buffer.from(await page.$eval('#e-preview', (e) => e.textContent)).equals(beforeMix), '.mix changed with locale');
+      assert(Buffer.from(await page.$eval('#e-preview-nsp', (e) => e.textContent)).equals(beforeNsp), '.nsp changed with locale');
+      await page.goto(new URL('/', page.url()).href, {waitUntil:'networkidle'});
+      const ruList = await page.$eval('tr[data-playlist-slug="e2e-relative"] td:nth-child(6)', (e) => e.textContent);
+      assert(ruList.includes('за 30 дней') && ruList.includes('не звучало 30 дней'), 'Russian list rendering: ' + ruList);
+      await page.selectOption('#ui-locale', 'en');
+      await page.waitForFunction(() => {
+        const row = document.querySelector('tr[data-playlist-slug="e2e-relative"]');
+        return row && row.querySelectorAll('td')[5].textContent.includes('not within 30 days');
+      });
+      const enList = await page.$eval('tr[data-playlist-slug="e2e-relative"] td:nth-child(6)', (e) => e.textContent);
+      assert(enList.includes('within 30 days') && enList.includes('not within 30 days'), 'English list rendering: ' + enList);
+      assert(!enList.includes('N days') && !/30 d\b/.test(enList), 'English list day value duplicated: ' + enList);
+      await page.goto(new URL('/edit/e2e-relative', page.url()).href, {waitUntil:'networkidle'});
+      await page.waitForSelector('#e-tree input[aria-label="Number of days"]');
+      await page.locator('#e-tree input[aria-label="Number of days"]').first().fill('1');
+      assert((await page.$eval('#e-rules .vcond:first-child', (e) => e.textContent)).includes('within 1 day'), 'English singular day');
+      await page.locator('#e-tree input[aria-label="Number of days"]').first().fill('2');
+      assert((await page.$eval('#e-rules .vcond:first-child', (e) => e.textContent)).includes('within 2 days'), 'English plural days');
+      await page.selectOption('#ui-locale', 'ru');
+      assert((await page.$eval('#e-rules .vcond:first-child', (e) => e.textContent)).includes('за 2 дня'), 'Russian two days');
+      await page.locator('#e-tree input[aria-label="Количество дней"]').first().fill('1');
+      assert((await page.$eval('#e-rules .vcond:first-child', (e) => e.textContent)).includes('за 1 день'), 'Russian singular day');
+    },
+  },
+];
+const allScenarios = [...scenarios, ...layoutScenarios, ...pageLayoutScenarios, ...headerScenarios, ...localeScenarios];
 
 // ---------------------------------------------------------------- main
 
@@ -1581,9 +1701,12 @@ async function main() {
         failed++;
         break;
       }
+      if (sc.relativeSeed) writeFileSync(path.join(store, "rules", "e2e-relative.mix"), seedRelativeMix, "utf8");
       const context = await browser.newContext({
         viewport: sc.viewport || { width: 1400, height: 900 },
+        locale: sc.locale || 'ru-RU',
       });
+      if (sc.storedLocale !== null) await context.addInitScript(() => localStorage.setItem('muzlovar.locale', 'ru'));
       const page = await context.newPage();
       try {
         await page.goto(base + (sc.url || "/edit/e2e-dnd"), { waitUntil: "networkidle" });

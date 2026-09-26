@@ -82,6 +82,7 @@ layoutWith mSection title mHeaderActions mainContent =
               <> main_ [class_ (if editorMode then "main-full" else "main")] mainContent
               <> footerEl
               <> div_ [id_ "toasts", makeAttribute "aria-live" "polite"] ""
+              <> script_ [src_ "/static/i18n.js"] ("" :: Text)
               <> script_ [src_ "/static/muzlovar.js"] ("" :: Text)
               <> dialogs
           )
@@ -266,6 +267,7 @@ indexPage entries =
     entryRow :: PlaylistEntry -> Html ()
     entryRow e =
       tr_
+        [makeAttribute "data-playlist-slug" (peSlug e)]
         ( td_ [class_ "title"] (toHtml (peTitle e))
             <> td_ [class_ "desc"] (toHtml (peDescription e))
             <> td_
@@ -286,8 +288,8 @@ indexPage entries =
 
         properties =
           mconcat
-            [ badge "public" (if pePublic e then "публичная" else "личная")
-            , maybe mempty (\n -> badge "" ("лимит " <> T.pack (show n))) (peLimit e)
+            [ badge (if pePublic e then "public" else "private") (if pePublic e then "публичная" else "личная")
+            , maybe mempty (\n -> badge "limit" ("лимит " <> T.pack (show n))) (peLimit e)
             , if peStale e then badge "stale" "нет .mix" else mempty
             , if peDraft e then badge "draft" "не опубликована" else mempty
             ]

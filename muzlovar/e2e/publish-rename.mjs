@@ -497,6 +497,7 @@ async function main() {
     if (!chrome) throw new Error("chrome not found; set MUZLOVAR_E2E_CHROME");
     browser = await chromium.launch({ executablePath: chrome, headless: true });
     const context = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+    await context.addInitScript(() => localStorage.setItem('muzlovar.locale', 'ru'));
     page = await context.newPage();
     page.on("pageerror", (e) => console.error("[e2e-rename] pageerror: " + e.message));
 

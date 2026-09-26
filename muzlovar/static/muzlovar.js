@@ -13,6 +13,10 @@
 (function () {
   'use strict';
 
+  var i18n = window.MuzlovarI18n;
+  function t(key, params) { return i18n.t(key, params); }
+  function label(kind, id, fallback, hint) { return i18n.schemaText(kind, id, fallback, hint); }
+
   var schema = null;
   var model = null;          // PlaylistDto
   var slug = null;           // null — новая подборка
@@ -22,17 +26,39 @@
   var selectedGroupId = null; // id группы-приёмника клика по палитре
   var validateTimer = null;
   var lastValidateOk = false;
+  var listDtos = {};
+  var listLoading = {};
+  var listSchemaLoading = false;
 
   var els = {};
 
   document.addEventListener('DOMContentLoaded', function () {
     cacheEls();
+    i18n.mountSwitcher();
+    i18n.applyStatic();
     initChrome();
     if (els.editor) {
       initEditor();
     }
     initList();
     initTrash();
+    document.addEventListener('muzlovar:localechange', function () {
+      localizeList();
+      if (els.editor && model && schema) {
+        buildPalette();
+        renderTree();
+        renderSort();
+        updatePreviewCard();
+        updatePath();
+        syncPublishButtons();
+        if (els['e-personal'] && schema.personalFields.length) {
+          els['e-personal'].textContent = t('validation.personal', { fields: schema.personalFields.map(function (id) {
+            var f = fieldById(id); return f ? label('field', f.nspName, f.title) : id;
+          }).join(', ') });
+        }
+        scheduleValidate(0);
+      }
+    });
   });
 
   function cacheEls() {
@@ -108,11 +134,11 @@
     target.hidden = false;
     target.className = errors.length ? 'state error' : 'state warn';
     if (errors.length) {
-      target.appendChild(el('h3', { text: heading || 'Ошибки' }));
+      target.appendChild(el('h3', { text: heading || t('validation.errors') }));
       target.appendChild(errorList(errors));
     }
     if (warnings.length) {
-      target.appendChild(el('h3', { text: 'Предупреждения' }));
+      target.appendChild(el('h3', { text: t('validation.warnings') }));
       target.appendChild(errorList(warnings));
     }
   }
@@ -121,10 +147,10 @@
     var ul = el('ul', { class: 'error-list' });
     errors.forEach(function (e) {
       var li = el('li');
-      li.appendChild(document.createTextNode(e.message || String(e)));
+      li.appendChild(document.createTextNode(i18n.apiMessage(e)));
       var pos = [];
       if (e.path) pos.push(e.path);
-      if (e.line) pos.push('строка ' + e.line + (e.column ? ', столбец ' + e.column : ''));
+      if (e.line) pos.push(t('error.line', {line:e.line}) + (e.column ? ', ' + t('error.column', {column:e.column}) : ''));
       if (pos.length) li.appendChild(el('span', { class: 'pos', text: ' — ' + pos.join(' · ') }));
       ul.appendChild(li);
     });
@@ -188,10 +214,10 @@
     var original = btn.textContent;
     btn.addEventListener('click', function () {
       var text = getText() || '';
-      if (!text) { toast('warn', 'Нечего копировать.'); return; }
+      if (!text) { toast('warn', t('message.nothingToCopy')); return; }
       var done = function () {
-        btn.textContent = 'Скопировано ✓';
-        setTimeout(function () { btn.textContent = original; }, 1500);
+        btn.textContent = t('action.copied');
+        setTimeout(function () { btn.textContent = t('action.copy'); }, 1500);
       };
       if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(text).then(done, function () {
@@ -424,7 +450,7 @@
       type: 'date',
       value: isDay(value) ? value : todayIso(),
       style: 'width:14ch',
-      'aria-label': aria || 'Значение',
+      'aria-label': aria || t('tree.value'),
       disabled: editable ? null : 'disabled',
       oninput: function (e) { setter(e.target.value); scheduleValidate(); }
     });
@@ -493,6 +519,17 @@
     return op !== 'bare' && op !== 'isMissing' && op !== 'isPresent';
   }
 
+  function inlineDaysOperator(item, name) {
+    if ((item.op !== 'inTheLast' && item.op !== 'notInTheLast') ||
+        !Number.isFinite(item.value) || !/N (?:days|дней)/.test(name)) return null;
+    var count = Math.abs(item.value);
+    var form = 'many';
+    if (i18n.getLocale() === 'en') form = count === 1 ? 'one' : 'many';
+    else if (count % 10 === 1 && count % 100 !== 11) form = 'one';
+    else if (count % 10 >= 2 && count % 10 <= 4 && (count % 100 < 12 || count % 100 > 14)) form = 'few';
+    return name.replace(/N (?:days|дней)/, String(item.value) + ' ' + t('value.day.' + form));
+  }
+
   /* Текстовое значение условия — для дерева предпросмотра. */
   function condValueText(field, item) {
     if (!needsValue(item.op)) return '';
@@ -502,7 +539,7 @@
       return (Array.isArray(v) && v.length === 2) ? (v[0] + '–' + v[1]) : '';
     }
     if (vt === 'days') {
-      return String(item.value) + ' дн.';
+      return t('value.days', {count:item.value});
     }
     if (vt === 'playlistRef') {
       var rv = item.value;
@@ -510,17 +547,16 @@
       var kindLabel = rv.kind;
       var refKinds = (field && field.refKinds) || [];
       for (var r = 0; r < refKinds.length; r++) {
-        if (refKinds[r].id === rv.kind) kindLabel = refKinds[r].label;
+        if (refKinds[r].id === rv.kind) kindLabel = label('ref', rv.kind, refKinds[r].label);
       }
       return (kindLabel || rv.kind || '') + ': ' + (rv.value || '');
     }
     if (field && field.valueType === 'bool') {
-      var variants = field.valueVariants || ['да', 'нет'];
-      return item.value ? (variants[0] || 'да') : (variants[1] || 'нет');
+      return item.value ? t('value.yes') : t('value.no');
     }
     if (field && field.enum && field.enum.length) {
       for (var i = 0; i < field.enum.length; i++) {
-        if (field.enum[i].value === item.value) return field.enum[i].label;
+        if (field.enum[i].value === item.value) return label('enum', field.enum[i].value, field.enum[i].label);
       }
     }
     if (item.value === null || item.value === undefined || item.value === '') return '';
@@ -537,10 +573,10 @@
     model = emptyModel();
     initDrag();
 
-    renderStatus('Загрузка…', 'loading');
+    renderStatus(t('validation.checking'), 'loading');
 
     api('/api/schema').then(function (res) {
-      if (!res.ok) throw new Error('Не удалось загрузить схему полей.');
+      if (!res.ok) throw new Error(t('message.loadSchema'));
       schema = res.data;
       return slug ? api('/api/playlists/' + encodeURIComponent(slug)) : null;
     }).then(function (res) {
@@ -555,7 +591,7 @@
         editable = d.editable !== false;
         els['e-mix'].value = d.mix || '';
         els['e-nsp'].value = d.nsp || '';
-        if (d.external) renderStatus('Внешняя подборка: дерево содержит конструкции, неизвестные редактору. Редактирование отключено.', 'warn');
+        if (d.external) renderStatus(t('message.externalReadonly'), 'warn');
         else renderStatus('', null);
       } else {
         renderStatus('', null);
@@ -577,8 +613,8 @@
 
   function errorText(res) {
     var errs = errorsOf(res.data);
-    if (errs.length) return errs.map(function (e) { return e.message; }).join(' ');
-    return 'Ошибка HTTP ' + res.status;
+    if (errs.length) return errs.map(function (e) { return i18n.apiMessage(e); }).join(' ');
+    return t('message.http', {status:res.status});
   }
 
   function normalize(dto) {
@@ -638,9 +674,9 @@
 
     // Персональные поля — предупреждение в UI.
     if (els['e-personal'] && schema.personalFields.length) {
-      els['e-personal'].textContent =
-        'Персональные поля (' + schema.personalFields.join(', ') + ') зависят от пользователя ' +
-        'и времени прослушивания — одно правило даёт разный плейлист.';
+      els['e-personal'].textContent = t('validation.personal', {fields:schema.personalFields.map(function (id) {
+        var f = fieldById(id); return f ? label('field', f.nspName, f.title) : id;
+      }).join(', ')});
       els['e-personal'].hidden = false;
     }
 
@@ -655,7 +691,7 @@
    * опубликованной — «Сохранить изменения» плюс сохранение копией. */
   function syncPublishButtons() {
     if (els['e-publish']) {
-      els['e-publish'].textContent = isPublished() ? 'Сохранить изменения' : 'Опубликовать';
+      els['e-publish'].textContent = isPublished() ? t('action.saveChanges') : t('action.publish');
     }
     if (els['e-publish-new']) els['e-publish-new'].hidden = !isPublished();
   }
@@ -708,9 +744,7 @@
     var next = pendingSlug ? pendingSlug + '.nsp' : '';
     var curName = current.split(/[\\\/]/).pop();
     if (next && next !== curName) {
-      p.textContent =
-        'Опубликовано:\n' + current +
-        '\n\nБудет опубликовано:\n' + publishFilePath(next);
+      p.textContent = t('message.publishedPath', {path:current, next:publishFilePath(next)});
     } else {
       p.textContent = current;
     }
@@ -722,16 +756,17 @@
     var meta = els['pl-meta'];
     if (!title || !meta || !model) return;
     var name = (model.name || '').trim();
-    title.textContent = name || 'Без названия';
+    title.textContent = name || t('editor.untitled');
     var limit = model.limit;
     if (limit === null || limit === undefined || limit < 0) {
-      meta.textContent = 'Лимит не задан';
+      meta.textContent = t('editor.noLimit');
     } else {
-      meta.textContent = limit + ' ' + trackWord(limit);
+      meta.textContent = t('editor.trackCount', {count:limit, unit:trackWord(limit)});
     }
   }
 
   function trackWord(n) {
+    if (i18n.getLocale() === 'en') return n === 1 ? 'track' : 'tracks';
     var n10 = n % 10;
     var n100 = n % 100;
     if (n10 === 1 && n100 !== 11) return 'трек';
@@ -761,7 +796,7 @@
     // Группы и состав приходят со схемы: копий списков полей здесь нет.
     var defs = (schema.ingredientGroups && schema.ingredientGroups.length)
       ? schema.ingredientGroups
-      : [{ id: 'all', name: 'Ингредиенты' }];
+      : [{ id: 'all', name: t('editor.ingredients') }];
     var order = [];
     var byId = {};
 
@@ -790,7 +825,7 @@
         'aria-expanded': 'true'
       }, [
         el('span', { class: 'caret', 'aria-hidden': 'true' }),
-        el('span', { class: 'ing-group-name', text: b.name }),
+        el('span', { class: 'ing-group-name', text: label('group', b.id, b.name) }),
         el('span', { class: 'ing-group-count', text: String(b.fields.length) })
       ]);
       head.addEventListener('click', function () {
@@ -810,12 +845,12 @@
 
   /* Компактная карточка: icon + название + drag handle. */
   function ingredientCard(f) {
-    var card = el('div', { class: 'ing', title: f.title + ' (' + f.nspName + ')' });
+    var card = el('div', { class: 'ing', title: label('field', f.nspName, f.title) + ' (' + f.nspName + ')' });
     card.setAttribute('data-chip-field', f.id);
     card.appendChild(el('span', { class: 'ing-icon t-' + f.valueType, text: typeGlyph(f.valueType) }));
-    card.appendChild(el('span', { class: 'ing-title', text: f.title }));
+    card.appendChild(el('span', { class: 'ing-title', text: label('field', f.nspName, f.title) }));
     if (isPersonal(f.id)) {
-      card.appendChild(el('span', { class: 'ing-flag', text: 'личное', title: 'Персональное поле' }));
+      card.appendChild(el('span', { class: 'ing-flag', text: t('tree.personal'), title: t('tree.personalTitle') }));
     }
     card.appendChild(el('span', { class: 'ing-handle', text: '⠿', 'aria-hidden': 'true' }));
     // Клик и drag обрабатываются делегированием (bindPaletteClicks,
@@ -904,11 +939,11 @@
     var head = el('div', { class: 'group-head' });
 
     head.appendChild(el('span', {
-      class: 'drag-handle', text: '⠿', title: 'Перетащить группу', 'aria-hidden': 'true'
+      class: 'drag-handle', text: '⠿', title: t('tree.dragGroup'), 'aria-hidden': 'true'
     }));
 
     var sel = el('select', {
-      'aria-label': 'Логика группы',
+      'aria-label': t('tree.groupLogic'),
       onchange: function (e) {
         group.kind = e.target.value;
         renderTree();
@@ -916,17 +951,17 @@
       }
     });
     schema.groupKinds.forEach(function (k) {
-      var o = el('option', { value: k.id, text: k.name });
+      var o = el('option', { value: k.id, text: label('logic', k.id, k.name) });
       if (k.id === group.kind) o.selected = true;
       sel.appendChild(o);
     });
     head.appendChild(sel);
-    head.appendChild(el('span', { class: 'count', text: group.items.length + ' элем.' }));
+    head.appendChild(el('span', { class: 'count', text: t('tree.items', {count:group.items.length}) }));
 
     if (path !== '/root') {
       head.appendChild(el('button', {
         class: 'small ghost danger quiet', type: 'button', text: '✕',
-        title: 'Убрать группу', 'aria-label': 'Убрать группу',
+        title: t('tree.removeGroup'), 'aria-label': t('tree.removeGroup'),
         disabled: editable ? null : 'disabled',
         onclick: function () {
           removeItemAt(path);
@@ -941,17 +976,17 @@
     head.appendChild(el('button', {
       class: 'small ghost quiet pick' + (picked ? ' on' : ''),
       type: 'button',
-      text: picked ? '✓ выбрана' : 'Выбрать',
+      text: picked ? t('tree.selected') : t('tree.select'),
       'aria-pressed': picked ? 'true' : 'false',
-      title: 'Клик по ингредиенту добавит условие в конец этой группы',
+      title: t('tree.selectHint'),
       onclick: function () {
         selectedGroupId = group.id;
-        toast('ok', 'Группа выбрана: клик по ингредиенту добавит условие сюда.');
+        toast('ok', t('tree.selectedToast'));
         renderTree();
       }
     }));
     head.appendChild(el('button', {
-      class: 'small add', type: 'button', text: '+ группа',
+      class: 'small add', type: 'button', text: t('tree.addGroup'),
       disabled: editable ? null : 'disabled',
       onclick: function () {
         var sub = { id: newId(), type: 'group', kind: 'any', items: [] };
@@ -961,7 +996,7 @@
       }
     }));
     head.appendChild(el('button', {
-      class: 'small add', type: 'button', text: '+ условие',
+      class: 'small add', type: 'button', text: t('tree.addCondition'),
       disabled: editable ? null : 'disabled',
       onclick: function () {
         group.items.push(defaultCond(schema.fields[0].id));
@@ -1007,20 +1042,20 @@
   function renderRaw(item, path) {
     var box = el('div', { class: 'cond raw' });
     box.appendChild(el('span', {
-      class: 'drag-handle', text: '⠿', title: 'Перетащить', 'aria-hidden': 'true'
+      class: 'drag-handle', text: '⠿', title: t('tree.drag'), 'aria-hidden': 'true'
     }));
-    box.appendChild(el('span', { class: 'raw-note', text: 'внешний узел' }));
+    box.appendChild(el('span', { class: 'raw-note', text: t('tree.externalNode') }));
     var text = '';
     try { text = JSON.stringify(item.raw); } catch (e) { text = String(item.raw); }
     box.appendChild(el('code', { class: 'raw-note', text: text.slice(0, 160) }));
     box.appendChild(el('span', {
       class: 'type-label',
-      text: 'Не выражимо в DSL — доступно только чтение.'
+      text: t('tree.externalReadonly')
     }));
     if (editable) {
       box.appendChild(el('button', {
-        class: 'small danger quiet', type: 'button', text: 'Удалить',
-        title: 'Удалить неизвестный узел',
+        class: 'small danger quiet', type: 'button', text: t('action.delete'),
+        title: t('tree.removeUnknown'),
         onclick: function () { removeItemAt(path); renderTree(); scheduleValidate(0); }
       }));
     }
@@ -1033,11 +1068,11 @@
 
     // drag handle слева — параметры inline, удаление справа.
     box.appendChild(el('span', {
-      class: 'drag-handle', text: '⠿', title: 'Перетащить', 'aria-hidden': 'true'
+      class: 'drag-handle', text: '⠿', title: t('tree.drag'), 'aria-hidden': 'true'
     }));
 
     var fieldSel = el('select', {
-      'aria-label': 'Поле',
+      'aria-label': t('tree.field'),
       'class': 'field-sel',
       disabled: editable ? null : 'disabled',
       onchange: function (e) {
@@ -1050,18 +1085,19 @@
       }
     });
     schema.fields.forEach(function (sf) {
-      var o = el('option', { value: sf.id, text: sf.title, title: sf.nspName });
+      var o = el('option', { value: sf.id, text: label('field', sf.nspName, sf.title), title: sf.nspName });
       if (sf.id === item.field) o.selected = true;
       fieldSel.appendChild(o);
     });
     box.appendChild(fieldSel);
 
     if (isPersonal(f.id)) {
-      box.appendChild(el('span', { class: 'badge personal', title: 'Персональное поле', text: 'личное' }));
+      box.appendChild(el('span', { class: 'badge personal', title: t('tree.personalTitle'), text: t('tree.personal') }));
     }
 
     var opSel = el('select', {
-      'aria-label': 'Оператор',
+      'data-role': 'operator',
+      'aria-label': t('tree.operator'),
       disabled: editable ? null : 'disabled',
       onchange: function (e) {
         item.op = e.target.value;
@@ -1073,8 +1109,8 @@
       var op = operatorById(oid);
       var o = el('option', {
         value: oid,
-        text: op ? op.name : oid,
-        title: op ? (op.name + ' — ' + op.hint) : oid
+        text: op ? label('operator', oid, op.name) : oid,
+        title: op ? (label('operator', oid, op.name) + ' — ' + label('operator', oid, op.hint, true)) : oid
       });
       if (oid === item.op) o.selected = true;
       opSel.appendChild(o);
@@ -1085,15 +1121,15 @@
       box.appendChild(valueEditor(f, item));
     } else {
       item.value = null;
-      box.appendChild(el('span', { class: 'type-label', text: '(без значения)' }));
+      box.appendChild(el('span', { class: 'type-label', text: t('tree.noValue') }));
     }
 
     var move = el('div', { class: 'move' });
     ['↑', '↓'].forEach(function (label, k) {
       move.appendChild(el('button', {
         class: 'small ghost', type: 'button', text: label,
-        'aria-label': (k === 0 ? 'Переместить вверх' : 'Переместить вниз'),
-        title: (k === 0 ? 'Переместить вверх' : 'Переместить вниз'),
+        'aria-label': t(k === 0 ? 'tree.moveUp' : 'tree.moveDown'),
+        title: t(k === 0 ? 'tree.moveUp' : 'tree.moveDown'),
         disabled: editable ? null : 'disabled',
         onclick: function () {
           var i = group.items.indexOf(item);
@@ -1107,8 +1143,9 @@
     });
     if (editable) {
       move.appendChild(el('button', {
+        'data-role': 'remove-condition',
         class: 'small danger quiet', type: 'button', text: '✕',
-        'aria-label': 'Удалить условие', title: 'Удалить условие',
+        'aria-label': t('tree.removeCondition'), title: t('tree.removeCondition'),
         onclick: function () { removeItemAt(path); renderTree(); scheduleValidate(0); }
       }));
     }
@@ -1123,10 +1160,10 @@
       if (!Array.isArray(item.value) || item.value.length !== 2) item.value = [0, 100];
       item.value[0] = clampNum(field, item.value[0]);
       item.value[1] = clampNum(field, item.value[1]);
-      var wrap = el('span', { class: 'type-label', text: 'между' });
+      var wrap = el('span', { class: 'type-label', text: t('tree.between') });
       var lo = el('input', addNumAttrs({
         type: 'number', value: String(item.value[0]), style: 'width:8ch',
-        'aria-label': 'Нижняя граница',
+        'aria-label': t('tree.lower'),
         disabled: editable ? null : 'disabled',
         oninput: function (e) {
           item.value[0] = clampNum(field, parseFloat(e.target.value) || 0);
@@ -1136,7 +1173,7 @@
       }, field));
       var hi = el('input', addNumAttrs({
         type: 'number', value: String(item.value[1]), style: 'width:8ch',
-        'aria-label': 'Верхняя граница',
+        'aria-label': t('tree.upper'),
         disabled: editable ? null : 'disabled',
         oninput: function (e) {
           item.value[1] = clampNum(field, parseFloat(e.target.value) || 0);
@@ -1145,7 +1182,7 @@
         onchange: function (e) { e.target.value = String(item.value[1]); }
       }, field));
       wrap.appendChild(lo);
-      wrap.appendChild(document.createTextNode(' и '));
+      wrap.appendChild(document.createTextNode(t('tree.and')));
       wrap.appendChild(hi);
       return wrap;
     }
@@ -1155,19 +1192,19 @@
           !isDay(item.value[0]) || !isDay(item.value[1])) {
         item.value = [todayIso(), todayIso()];
       }
-      var dwrap = el('span', { class: 'type-label', text: 'между' });
-      dwrap.appendChild(dateInput(item.value[0], function (v) { item.value[0] = v; }, 'Нижняя граница'));
-      dwrap.appendChild(document.createTextNode(' и '));
-      dwrap.appendChild(dateInput(item.value[1], function (v) { item.value[1] = v; }, 'Верхняя граница'));
+      var dwrap = el('span', { class: 'type-label', text: t('tree.between') });
+      dwrap.appendChild(dateInput(item.value[0], function (v) { item.value[0] = v; }, t('tree.lower')));
+      dwrap.appendChild(document.createTextNode(t('tree.and')));
+      dwrap.appendChild(dateInput(item.value[1], function (v) { item.value[1] = v; }, t('tree.upper')));
       return dwrap;
     }
 
     if (vt === 'days') {
       if (typeof item.value !== 'number') item.value = 30;
-      return el('span', { class: 'type-label', text: 'за N дней:' }, [
+      return el('span', { class: 'type-label', text: t('tree.days') }, [
         el('input', {
           type: 'number', min: '1', value: String(item.value), style: 'width:8ch;margin-left:6px',
-          'aria-label': 'Количество дней',
+          'aria-label': t('tree.daysAria'),
           disabled: editable ? null : 'disabled',
           oninput: function (e) { item.value = parseInt(e.target.value, 10) || 0; scheduleValidate(); }
         })
@@ -1191,19 +1228,19 @@
       if (typeof item.value.value !== 'string') item.value.value = '';
       var rwrap = el('span', {});
       var ksel = el('select', {
-        'aria-label': 'Вид ссылки',
+        'aria-label': t('tree.refKind'),
         disabled: editable ? null : 'disabled',
         onchange: function (e) { item.value.kind = e.target.value; scheduleValidate(); }
       });
       kinds.forEach(function (k) {
-        var o = el('option', { value: k.id, text: k.label });
+        var o = el('option', { value: k.id, text: label('ref', k.id, k.label) });
         if (item.value.kind === k.id) o.selected = true;
         ksel.appendChild(o);
       });
       rwrap.appendChild(ksel);
       rwrap.appendChild(el('input', {
         type: 'text', value: item.value.value, style: 'width:18ch;margin-left:6px',
-        'aria-label': 'Значение ссылки',
+        'aria-label': t('tree.refValue'),
         disabled: editable ? null : 'disabled',
         oninput: function (e) { item.value.value = e.target.value; scheduleValidate(); }
       }));
@@ -1212,11 +1249,12 @@
 
     if (vt === 'bool') {
       var sel = el('select', {
-        'aria-label': 'Значение',
+        'data-role': 'boolean-value',
+        'aria-label': t('tree.value'),
         disabled: editable ? null : 'disabled',
         onchange: function (e) { item.value = e.target.value === 'true'; scheduleValidate(); }
       });
-      var variants = field.valueVariants || ['да', 'нет'];
+      var variants = [t('value.yes'), t('value.no')];
       ['true', 'false'].forEach(function (v, i) {
         var o = el('option', { value: v, text: variants[i] || v });
         if (String(!!item.value) === v) o.selected = true;
@@ -1229,8 +1267,9 @@
       if (typeof item.value !== 'number') item.value = 0;
       item.value = clampNum(field, item.value);
       return el('input', addNumAttrs({
+        'data-role': 'number-value',
         type: 'number', value: String(item.value), style: 'width:12ch',
-        'aria-label': 'Числовое значение',
+        'aria-label': t('tree.number'),
         disabled: editable ? null : 'disabled',
         oninput: function (e) {
           item.value = clampNum(field, parseFloat(e.target.value) || 0);
@@ -1246,12 +1285,12 @@
       var known = field.enum.some(function (v) { return v.value === item.value; });
       if (typeof item.value !== 'string' || !known) item.value = field.enum[0].value;
       var esel = el('select', {
-        'aria-label': 'Значение',
+        'aria-label': t('tree.value'),
         disabled: editable ? null : 'disabled',
         onchange: function (e) { item.value = e.target.value; scheduleValidate(); }
       });
       field.enum.forEach(function (v) {
-        var o = el('option', { value: v.value, text: v.label });
+        var o = el('option', { value: v.value, text: label('enum', v.value, v.label) });
         if (item.value === v.value) o.selected = true;
         esel.appendChild(o);
       });
@@ -1260,8 +1299,9 @@
 
     if (typeof item.value !== 'string') item.value = '';
     return el('input', {
+      'data-role': 'text-value',
       type: 'text', value: item.value, style: 'width:18ch',
-      'aria-label': 'Текстовое значение',
+      'aria-label': t('tree.text'),
       disabled: editable ? null : 'disabled',
       oninput: function (e) { item.value = e.target.value; scheduleValidate(); }
     });
@@ -1282,13 +1322,13 @@
     var any = group.kind === 'any';
     var wrap = el('div', { class: 'vgroup ' + (any ? 'kind-any' : 'kind-all') });
     wrap.appendChild(el('div', { class: 'vgroup-head' }, [
-      el('span', { class: 'vk', text: any ? 'ЛЮБОЕ' : 'ВСЕ' }),
-      el('span', { class: 'vcount', text: group.items.length + ' элем.' })
+      el('span', { class: 'vk', text: t(any ? 'tree.any' : 'tree.all') }),
+      el('span', { class: 'vcount', text: t('tree.items', {count:group.items.length}) })
     ]));
 
     var list = el('div', { class: 'vlist' + (group.items.length ? '' : ' plain') });
     if (!group.items.length) {
-      list.appendChild(el('div', { class: 'vempty', text: 'нет условий' }));
+      list.appendChild(el('div', { class: 'vempty', text: t('tree.empty') }));
     }
     group.items.forEach(function (item) {
       if (item.type === 'group') {
@@ -1296,18 +1336,20 @@
         return;
       }
       if (item.type === 'raw') {
-        list.appendChild(el('div', { class: 'vcond', text: 'внешний узел — только чтение' }));
+        list.appendChild(el('div', { class: 'vcond', text: t('tree.externalView') }));
         return;
       }
       var f = fieldById(item.field);
       var op = operatorById(item.op);
+      var opName = op ? label('operator', item.op, op.name) : item.op;
+      var inlineOp = inlineDaysOperator(item, opName);
       var row = el('div', { class: 'vcond' }, [
-        el('span', { class: 'vfield', text: f ? f.title : item.field }),
-        el('span', { class: 'vop', text: op ? op.name : item.op })
+        el('span', { class: 'vfield', text: f ? label('field', f.nspName, f.title) : item.field }),
+        el('span', { class: 'vop', text: inlineOp || opName })
       ]);
-      var value = condValueText(f, item);
+      var value = inlineOp ? '' : condValueText(f, item);
       if (value) row.appendChild(el('span', { class: 'vval', text: value }));
-      if (f && isPersonal(f.id)) row.appendChild(el('span', { class: 'badge personal', text: 'личное' }));
+      if (f && isPersonal(f.id)) row.appendChild(el('span', { class: 'badge personal', text: t('tree.personal') }));
       list.appendChild(row);
     });
 
@@ -1325,7 +1367,7 @@
     clear(box);
 
     var modeSel = el('select', {
-      'aria-label': 'Режим сортировки',
+      'aria-label': t('sort.mode'),
       disabled: editable ? null : 'disabled',
       onchange: function (e) {
         var v = e.target.value;
@@ -1335,7 +1377,7 @@
         renderSort(); scheduleValidate(0);
       }
     });
-    [['random', 'случайно'], ['fields', 'по полям'], ['none', 'по умолчанию']].forEach(function (pair) {
+    [['random', t('sort.random')], ['fields', t('sort.fields')], ['none', t('sort.default')]].forEach(function (pair) {
       var cur = model.sort ? model.sort.kind : 'none';
       var o = el('option', { value: pair[0], text: pair[1] });
       if (pair[0] === cur) o.selected = true;
@@ -1346,7 +1388,7 @@
     if (model.sort && model.sort.kind === 'raw') {
       box.appendChild(el('div', {
         class: 'state warn',
-        text: 'Сортировка из внешнего файла не поддерживается редактором: ' + model.sort.text
+        text: t('sort.external', {text:model.sort.text})
       }));
       return;
     }
@@ -1359,31 +1401,31 @@
       model.sort.items.forEach(function (s, i) {
         var row = el('span', { class: 'cond' });
         var fs = el('select', {
-          'aria-label': 'Поле сортировки',
+          'aria-label': t('sort.field'),
           disabled: editable ? null : 'disabled',
           onchange: function (e) { s.field = e.target.value; scheduleValidate(); }
         });
         schema.sortFields.forEach(function (id) {
           var f = fieldById(id);
-          var o = el('option', { value: id, text: f ? f.title : id });
+          var o = el('option', { value: id, text: f ? label('field', f.nspName, f.title) : id });
           if (id === s.field) o.selected = true;
           fs.appendChild(o);
         });
         row.appendChild(fs);
         var ds = el('select', {
-          'aria-label': 'Направление',
+          'aria-label': t('sort.direction'),
           disabled: editable ? null : 'disabled',
           onchange: function (e) { s.dir = e.target.value; scheduleValidate(); }
         });
         schema.sortDirections.forEach(function (d) {
-          var o = el('option', { value: d.id, text: d.name });
+          var o = el('option', { value: d.id, text: label('direction', d.id, d.name) });
           if (d.id === s.dir) o.selected = true;
           ds.appendChild(o);
         });
         row.appendChild(ds);
         row.appendChild(el('button', {
           class: 'small danger quiet', type: 'button', text: '✕',
-          'aria-label': 'Убрать поле сортировки',
+          'aria-label': t('sort.remove'),
           disabled: editable ? null : 'disabled',
           onclick: function () {
             model.sort.items.splice(i, 1);
@@ -1395,7 +1437,7 @@
       });
       box.appendChild(list);
       box.appendChild(el('button', {
-        class: 'small add', type: 'button', text: '+ поле',
+        class: 'small add', type: 'button', text: t('sort.add'),
         disabled: editable ? null : 'disabled',
         onclick: function () {
           model.sort.items.push({ field: schema.sortFields[0], dir: 'asc' });
@@ -1762,13 +1804,13 @@
   function runValidate() {
     if (!model) return Promise.resolve(false);
     validateTimer = null;
-    setValidity('pending', 'Проверяем…');
+    setValidity('pending', t('validation.checking'));
     return api('/api/validate', { method: 'POST', body: model }).then(function (res) {
       var errs = errorsOf(res.data);
       var warns = (res.data && Array.isArray(res.data.warnings)) ? res.data.warnings : [];
       lastValidateOk = res.ok && !errs.length;
       renderErrors(els['e-errors'], errs,
-        lastValidateOk ? '' : 'Подборка не прошла валидацию', warns);
+        lastValidateOk ? '' : t('validation.failed'), warns);
       if (lastValidateOk && res.data.mix) {
         els['e-preview'].textContent = res.data.mix;
         els['e-preview'].parentNode.hidden = false;
@@ -1794,17 +1836,17 @@
         // Предупреждения не блокируют публикацию — только сообщают.
         setValidity(warns.length ? 'warn' : 'ok',
           warns.length
-            ? 'Проверено — есть предупреждения: ' + warns.length
-            : 'Проверено — можно публиковать');
+            ? t('validation.warnCount', {count:warns.length})
+            : t('validation.ok'));
       } else {
-        setValidity('err', 'Ошибки: ' + errs.length);
+        setValidity('err', t('validation.errorCount', {count:errs.length}));
       }
       return lastValidateOk;
     }).catch(function () {
       renderErrors(els['e-errors'],
-        [{ message: 'Сервер недоступен — проверка не выполнена.' }], 'Ошибка');
+        [{ message: t('validation.serverUnavailable') }], t('error.title'));
       lastValidateOk = false;
-      setValidity('err', 'Сервер недоступен');
+      setValidity('err', t('validation.serverShort'));
       return false;
     });
   }
@@ -1831,7 +1873,7 @@
     // сервер при сохранении выполняет свою проверку независимо.
     validatedNow().then(function (ok) {
       if (!ok) {
-        toast('error', 'Сначала исправьте ошибки валидации.');
+        toast('error', t('message.fixValidation'));
         return;
       }
       sendPublish(false);
@@ -1845,7 +1887,7 @@
   function publishAsNew() {
     validatedNow().then(function (ok) {
       if (!ok) {
-        toast('error', 'Сначала исправьте ошибки валидации.');
+        toast('error', t('message.fixValidation'));
         return;
       }
       sendPublish(false, true);
@@ -1862,9 +1904,8 @@
       : '/api/playlists/' + encodeURIComponent(slug) + (overwrite ? '?overwrite=1' : '');
     api(url, { method: create ? 'POST' : 'PUT', body: model }).then(function (res) {
       if (res.ok) {
-        toast('ok', asNew
-          ? 'Сохранено как новая подборка: ' + (res.data.entry ? res.data.entry.name : '')
-          : 'Подборка опубликована: ' + (res.data.entry ? res.data.entry.name : ''));
+        toast('ok', t(asNew ? 'message.savedNew' : 'message.published',
+          {name:res.data.entry ? res.data.entry.name : ''}));
         var entry = res.data.entry || null;
         var newSlug = entry ? entry.slug : slug;
         if (newSlug && newSlug !== slug) {
@@ -1895,17 +1936,17 @@
       if (res.status === 409) {
         var e = errorsOf(res.data)[0] || {};
         if (e.code === 'external_readonly') {
-          renderErrors(els['e-errors'], [e], 'Внешняя подборка');
-          toast('error', 'Внешнюю подборку нельзя редактировать.');
+          renderErrors(els['e-errors'], [e], t('message.externalPlaylist'));
+          toast('error', t('message.externalEdit'));
           return;
         }
-        confirmOverwrite(e.message || 'Файлы уже существуют.', asNew);
+        confirmOverwrite(e.message || t('message.filesExist'), asNew);
         return;
       }
-      renderErrors(els['e-errors'], errorsOf(res.data), 'Не удалось опубликовать');
-      toast('error', 'Публикация не выполнена.');
+      renderErrors(els['e-errors'], errorsOf(res.data), t('message.publishFailed'));
+      toast('error', t('message.publishNotDone'));
     }).catch(function () {
-      toast('error', 'Сервер недоступен.');
+      toast('error', t('message.serverUnavailable'));
     });
   }
 
@@ -1936,6 +1977,82 @@
         openDeleteDialog(name, !external, function () { doDelete(target); });
       });
     });
+    localizeList();
+  }
+
+  function listSummary(dto) {
+    function valueText(f, c) {
+      if (c.value === null || c.value === undefined) return '';
+      if (typeof c.value === 'boolean') return c.value ? t('value.yes') : t('value.no');
+      if (Array.isArray(c.value)) return c.value.map(function (x) { return String(x); }).join(' … ');
+      if (typeof c.value === 'object') return condValueText(f, c);
+      if (typeof c.value === 'string') return '“' + c.value + '”';
+      return String(c.value);
+    }
+    function group(g, depth) {
+      var kind = t(g.kind === 'any' ? 'tree.any' : 'tree.all');
+      if (depth > 3) return kind + ' …';
+      if (!g.items || !g.items.length) return kind + ' ' + t('list.emptyGroup');
+      return kind + ': ' + g.items.map(function (item) {
+        if (item.type === 'group') return '(' + group(item, depth + 1) + ')';
+        if (item.type === 'raw') return t('list.externalNode');
+        var f = fieldById(item.field);
+        var op = operatorById(item.op);
+        var name = f ? label('field', f.nspName, f.title) : item.field;
+        var opName = op ? label('operator', item.op, op.name) : item.op;
+        var inlineOp = inlineDaysOperator(item, opName);
+        var value = inlineOp ? '' : valueText(f, item);
+        return name + ' ' + (inlineOp || opName) + (value ? ' ' + value : '');
+      }).join(g.kind === 'any' ? ' ∨ ' : ' ∧ ');
+    }
+    return group(dto.root, 0);
+  }
+
+  function listSort(dto) {
+    if (!dto.sort) return t('sort.default');
+    if (dto.sort.kind === 'random') return t('sort.random');
+    if (dto.sort.kind === 'raw') return dto.sort.text || '';
+    return (dto.sort.items || []).map(function (item) {
+      var f = fieldById(item.field);
+      return (f ? label('field', f.nspName, f.title) : item.field) + ' ' +
+        label('direction', item.dir, item.dir);
+    }).join(', ');
+  }
+
+  function localizeList() {
+    var rows = document.querySelectorAll('tr[data-playlist-slug]');
+    if (!rows.length) return;
+    rows.forEach(function (row) {
+      var cells = row.querySelectorAll('td');
+      if (cells.length < 6) return;
+      if (!cells[4].hasAttribute('data-ru')) cells[4].setAttribute('data-ru', cells[4].textContent);
+      if (!cells[5].hasAttribute('data-ru')) cells[5].setAttribute('data-ru', cells[5].textContent);
+      if (i18n.getLocale() === 'ru') {
+        cells[4].textContent = cells[4].getAttribute('data-ru');
+        cells[5].textContent = cells[5].getAttribute('data-ru');
+        return;
+      }
+      var slug = row.getAttribute('data-playlist-slug');
+      function render(dto) {
+        if (i18n.getLocale() !== 'en' || !schema || !dto) return;
+        cells[4].textContent = listSort(dto);
+        cells[5].textContent = listSummary(dto);
+      }
+      if (listDtos[slug] && schema) { render(listDtos[slug]); return; }
+      if (!schema) {
+        if (!listSchemaLoading) {
+          listSchemaLoading = true;
+          api('/api/schema').then(function (res) { if (res.ok) { schema = res.data; localizeList(); } });
+        }
+        return;
+      }
+      if (listLoading[slug]) return;
+      listLoading[slug] = true;
+      api('/api/playlists/' + encodeURIComponent(slug)).then(function (res) {
+        if (res.ok && res.data.playlist) { listDtos[slug] = res.data.playlist; render(listDtos[slug]); }
+        listLoading[slug] = false;
+      });
+    });
   }
 
   /* Диалог подтверждения: ввод точного названия. Возвращает false,
@@ -1948,7 +2065,7 @@
     document.getElementById('delete-confirm').disabled = true;
     document.getElementById('delete-warning').hidden = !!isEditable;
     if (typeof dlg.showModal !== 'function') {
-      if (window.confirm('Удалить подборку «' + name + '»?')) onConfirm();
+      if (window.confirm(t('dialog.confirmDelete', {name:name}))) onConfirm();
       return true;
     }
     dlg.showModal();
@@ -1972,24 +2089,24 @@
     api('/api/playlists/' + encodeURIComponent(target), { method: 'DELETE' })
       .then(function (res) {
         if (res.ok) {
-          var note = 'Перенесено в корзину.';
+          var note = t('message.movedToTrash');
           if (res.data.subsonic && res.data.subsonic.attempted) {
             note += res.data.subsonic.ok
-              ? ' Сущность удалена в Navidrome.'
-              : ' Сущность в Navidrome осталась: ' + (res.data.subsonic.message || '');
+              ? t('message.navidromeDeleted')
+              : t('message.navidromeRemains', {reason:res.data.subsonic.message || ''});
           } else if (res.data.subsonic) {
-            note += ' Сущность в Navidrome нужно удалить вручную (Subsonic не настроен).';
+            note += t('message.navidromeManual');
           }
           toast('ok', note);
           window.location.href = '/trash';
         } else if (res.status === 409) {
           toast('error', errorText(res));
         } else {
-          renderErrors(els['e-errors'], errorsOf(res.data), 'Не удалось удалить');
+          renderErrors(els['e-errors'], errorsOf(res.data), t('message.deleteFailed'));
           toast('error', errorText(res));
         }
       })
-      .catch(function () { toast('error', 'Сервер недоступен.'); });
+      .catch(function () { toast('error', t('message.serverUnavailable')); });
   }
 
   /* ------------------------------------------------------------------ */
@@ -2002,22 +2119,22 @@
         var id = btn.getAttribute('data-restore');
         api('/api/trash/' + encodeURIComponent(id) + '/restore', { method: 'POST', body: {} })
           .then(function (res) {
-            if (res.ok) { toast('ok', 'Подборка восстановлена.'); location.reload(); }
+            if (res.ok) { toast('ok', t('message.restored')); location.reload(); }
             else toast('error', errorText(res));
           })
-          .catch(function () { toast('error', 'Сервер недоступен.'); });
+          .catch(function () { toast('error', t('message.serverUnavailable')); });
       });
     });
     document.querySelectorAll('[data-purge]').forEach(function (btn) {
       btn.addEventListener('click', function () {
         var id = btn.getAttribute('data-purge');
-        if (!window.confirm('Удалить запись «' + id + '» из корзины безвозвратно?')) return;
+        if (!window.confirm(t('message.purgeConfirm', {id:id}))) return;
         api('/api/trash/' + encodeURIComponent(id), { method: 'DELETE' })
           .then(function (res) {
-            if (res.ok) { toast('ok', 'Запись удалена.'); location.reload(); }
+            if (res.ok) { toast('ok', t('message.purged')); location.reload(); }
             else toast('error', errorText(res));
           })
-          .catch(function () { toast('error', 'Сервер недоступен.'); });
+          .catch(function () { toast('error', t('message.serverUnavailable')); });
       });
     });
   }

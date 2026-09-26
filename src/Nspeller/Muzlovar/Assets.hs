@@ -19,6 +19,7 @@
 -- (котёл с нотой), она же branding шапки.
 module Nspeller.Muzlovar.Assets
   ( muzlovarCss
+  , muzlovarI18n
   , muzlovarJs
   , logoPng
   , faviconIco
@@ -30,6 +31,11 @@ import Data.FileEmbed (embedFile)
 -- | Стили тёмной темы.
 muzlovarCss :: ByteString
 muzlovarCss = $(embedFile "muzlovar/static/muzlovar.css")
+
+-- | Client-side interface translations, embedded alongside the editor script
+-- and served before it so every view uses the same message catalog.
+muzlovarI18n :: ByteString
+muzlovarI18n = $(embedFile "muzlovar/static/i18n.js")
 
 -- | Логика редактора (vanilla JS).
 muzlovarJs :: ByteString
