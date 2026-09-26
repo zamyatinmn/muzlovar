@@ -10,7 +10,7 @@ Muzlovar lets you build complex [Navidrome smart playlists](https://www.navidrom
 
 The browser edits a DTO; it does not contain a second playlist compiler. Muzlovar's server and the bundled **Nspeller** CLI both use the same Haskell field registry, typed AST, validation rules, renderer, and Navidrome model.
 
-**Language:** The Muzlovar web UI supports Russian and English. Choose the interface language in the header; the browser saves your choice locally. Nspeller playlist DSL syntax remains Russian. The screenshot below shows the Russian interface.
+**Language:** The Muzlovar web UI and Nspeller `.mix` DSL both support Russian and English. Choose the UI language in the header and the independent DSL language in the `.mix` preview; the browser saves explicit choices locally. Both dialects compile to identical `.nsp` output, and existing Russian recipes remain supported. The screenshot below shows the Russian interface.
 
 ## Highlights
 
@@ -80,7 +80,7 @@ The override builds the same production Dockerfile locally and tags it as `muzlo
 ```text
 Visual editor DTO ─┐
                    ├─> typed Haskell AST -> validation -> canonical .mix
-Russian .mix DSL ──┘                                      |
+RU/EN .mix DSL ────┘                                      |
                                                             v
                                                 Navidrome model -> .nsp JSON
 ```
@@ -135,7 +135,7 @@ Release tags matching `vX.Y.Z` publish images for `linux/amd64`. A tag such as `
 
 ## Nspeller: the compiler behind Muzlovar
 
-Nspeller turns the human-readable `.mix` DSL into Navidrome `.nsp` JSON. The DSL keywords remain Russian regardless of the Web UI language. Files are UTF-8 and may contain `#` line comments.
+Nspeller turns the human-readable Russian or English `.mix` DSL into Navidrome `.nsp` JSON. Files are UTF-8 and may contain `#` line comments. UI language and DSL language can be selected separately.
 
 ```text
 подборка "Forgotten favourites"
@@ -191,7 +191,7 @@ Nspeller lowers `>=` and `<=` into valid Navidrome expressions because NSP has n
 
 The registry currently covers track metadata; listening-history and rating fields; album and artist aggregate fields; audio/file properties; MusicBrainz identifiers; and playlist references. It rejects undocumented or unsupported combinations before JSON generation. Dynamic Navidrome tags and arbitrary custom fields are not supported.
 
-For the exhaustive field tables, operator matrix, grammar, numeric bounds, warning rules, all five examples, JSON format, type-safety notes, and exact error categories, see the preserved [Nspeller reference in Russian](docs/nspeller-reference.ru.md). The runnable source/expected-output pairs are in [`examples/`](examples/).
+For the English grammar and field catalog, see the [English DSL reference](docs/nspeller-reference.en.md). The [Russian reference](docs/nspeller-reference.ru.md) retains the detailed Russian grammar, warning rules, examples, and error categories. The runnable source/expected-output pairs are in [`examples/`](examples/).
 
 ### Validation and warnings
 
@@ -243,7 +243,7 @@ Set `MUZLOVAR_E2E_CHROME` to a browser executable when it cannot be discovered a
 
 - Muzlovar is file-backed; it has no application database or file watcher.
 - Subsonic integration only looks up playlists and deletes a playlist entity. Creation and updates happen by writing `.nsp` files for Navidrome to scan.
-- The Nspeller DSL and server diagnostic messages remain Russian. Muzlovar localizes its interface to Russian and English; unknown server diagnostics are shown as received.
+- Nspeller DSL supports Russian and English. Server diagnostic messages remain Russian; unknown server diagnostics are shown as received.
 - There is no music-file analysis, recommendation engine, ML, Android integration, or recursive `build-all`.
 - `limitPercent`, general negation, list operands, and arbitrary custom Navidrome fields are not supported.
 - External NSP trees containing nodes that cannot be represented by the DSL are read-only.

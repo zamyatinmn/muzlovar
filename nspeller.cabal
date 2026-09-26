@@ -17,6 +17,7 @@ extra-doc-files:
     CONTRIBUTING.md
     SECURITY.md
     docs/nspeller-reference.ru.md
+    docs/nspeller-reference.en.md
 
 source-repository head
   type:             git
@@ -40,6 +41,7 @@ library
       Nspeller.Ast
       Nspeller.Cli
       Nspeller.Compiler
+      Nspeller.Dialect
       Nspeller.Fields
       Nspeller.Navidrome
       Nspeller.Parser
@@ -107,6 +109,7 @@ test-suite nspeller-test
   hs-source-dirs:   test
   main-is:          Main.hs
   other-modules:
+      BilingualTests
       DtoTests
       Generators
       GoldenTests

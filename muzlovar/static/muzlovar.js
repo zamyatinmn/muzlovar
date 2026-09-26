@@ -17,6 +17,13 @@
   function t(key, params) { return i18n.t(key, params); }
   function label(kind, id, fallback, hint) { return i18n.schemaText(kind, id, fallback, hint); }
 
+  // UI locale and source dialect are independent after initial selection.
+  var savedDslLocale = null;
+  try { savedDslLocale = window.localStorage.getItem('muzlovar.dslLocale'); } catch (_) { /* private mode */ }
+  var dslLocale = (savedDslLocale === 'ru' || savedDslLocale === 'en') ? savedDslLocale : i18n.getLocale();
+  var explicitDslLocale = savedDslLocale === 'ru' || savedDslLocale === 'en';
+  function dslQuery() { return 'dsl=' + encodeURIComponent(dslLocale); }
+
   var schema = null;
   var model = null;          // PlaylistDto
   var slug = null;           // null — новая подборка
@@ -43,6 +50,8 @@
     initList();
     initTrash();
     document.addEventListener('muzlovar:localechange', function () {
+      var dslSelector = document.getElementById('dsl-locale');
+      if (dslSelector) dslSelector.setAttribute('aria-label', t('editor.dslLanguage'));
       localizeList();
       if (els.editor && model && schema) {
         buildPalette();
@@ -571,6 +580,7 @@
     var raw = els.editor.getAttribute('data-slug');
     slug = raw && raw.length ? raw : null;
     model = emptyModel();
+    mountDslSwitcher();
     initDrag();
 
     renderStatus(t('validation.checking'), 'loading');
@@ -588,6 +598,10 @@
         }
         var d = res.data;
         if (d.playlist) model = normalize(d.playlist);
+        if (!explicitDslLocale && (d.mixDialect === 'ru' || d.mixDialect === 'en')) {
+          dslLocale = d.mixDialect;
+          document.getElementById('dsl-locale').value = dslLocale;
+        }
         editable = d.editable !== false;
         els['e-mix'].value = d.mix || '';
         els['e-nsp'].value = d.nsp || '';
@@ -609,6 +623,26 @@
       renderStatus(String(e.message || e), 'error');
       setActions(false);
     });
+  }
+
+  function mountDslSwitcher() {
+    var host = document.querySelector('#tab-mix .block-head');
+    if (!host) return;
+    var select = document.createElement('select');
+    select.id = 'dsl-locale'; select.className = 'locale-switch';
+    select.setAttribute('aria-label', t('editor.dslLanguage'));
+    [['ru','Русский'],['en','English']].forEach(function (pair) {
+      var option = document.createElement('option');
+      option.value = pair[0]; option.textContent = pair[1]; select.appendChild(option);
+    });
+    select.value = dslLocale;
+    select.addEventListener('change', function () {
+      dslLocale = select.value;
+      explicitDslLocale = true;
+      try { window.localStorage.setItem('muzlovar.dslLocale', dslLocale); } catch (_) { /* private mode */ }
+      scheduleValidate(0);
+    });
+    host.insertBefore(select, host.lastElementChild);
   }
 
   function errorText(res) {
@@ -1805,7 +1839,7 @@
     if (!model) return Promise.resolve(false);
     validateTimer = null;
     setValidity('pending', t('validation.checking'));
-    return api('/api/validate', { method: 'POST', body: model }).then(function (res) {
+    return api('/api/validate?' + dslQuery(), { method: 'POST', body: model }).then(function (res) {
       var errs = errorsOf(res.data);
       var warns = (res.data && Array.isArray(res.data.warnings)) ? res.data.warnings : [];
       lastValidateOk = res.ok && !errs.length;
@@ -1902,6 +1936,7 @@
     var url = create
       ? '/api/playlists' + (overwrite ? '?overwrite=1' : '')
       : '/api/playlists/' + encodeURIComponent(slug) + (overwrite ? '?overwrite=1' : '');
+    url += (url.indexOf('?') < 0 ? '?' : '&') + dslQuery();
     api(url, { method: create ? 'POST' : 'PUT', body: model }).then(function (res) {
       if (res.ok) {
         toast('ok', t(asNew ? 'message.savedNew' : 'message.published',

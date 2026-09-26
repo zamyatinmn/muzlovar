@@ -35,6 +35,8 @@ module Nspeller.Muzlovar.Types
   , Compiled (..)
   , compilePlaylistDto
   , compilePlaylistDtoWarnings
+  , compilePlaylistDtoIn
+  , compilePlaylistDtoWarningsIn
 
     -- * Обратные переводы
   , validToDto
@@ -65,9 +67,10 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Calendar (Day)
 import Nspeller.Ast
+import Nspeller.Dialect (DslDialect (..))
 import Nspeller.Navidrome (encodeNsp, toNsp)
 import Nspeller.Parser (parsePlaylist)
-import Nspeller.Render (renderParsedFile)
+import Nspeller.Render (renderParsedFile, renderParsedFileIn)
 import Nspeller.Validation (validatePlaylist, validatePlaylistWithWarnings)
 
 ------------------------------------------------------------------------------
@@ -494,7 +497,10 @@ data Compiled = Compiled
 -- Предупреждения возвращаются отдельным списком ('compilePlaylistDtoWarnings')
 -- и на результат не влияют; здесь они отбрасываются.
 compilePlaylistDto :: PlaylistDto -> Either [ApiError] Compiled
-compilePlaylistDto = fmap fst . compilePlaylistDtoWarnings
+compilePlaylistDto = compilePlaylistDtoIn Ru
+
+compilePlaylistDtoIn :: DslDialect -> PlaylistDto -> Either [ApiError] Compiled
+compilePlaylistDtoIn d = fmap fst . compilePlaylistDtoWarningsIn d
 
 -- | Как 'compilePlaylistDto', но возвращает также предупреждения
 -- валидации — в формате 'ApiError' с кодом @"warning"@ и позицией в
@@ -503,9 +509,13 @@ compilePlaylistDto = fmap fst . compilePlaylistDtoWarnings
 compilePlaylistDtoWarnings ::
   PlaylistDto ->
   Either [ApiError] (Compiled, [ApiError])
-compilePlaylistDtoWarnings dto = do
+compilePlaylistDtoWarnings = compilePlaylistDtoWarningsIn Ru
+
+compilePlaylistDtoWarningsIn ::
+  DslDialect -> PlaylistDto -> Either [ApiError] (Compiled, [ApiError])
+compilePlaylistDtoWarningsIn d dto = do
   parsed0 <- first dtoErrorsToApi (dtoToParsed dto)
-  let mix = renderParsedFile parsed0
+  let mix = if d == Ru then renderParsedFile parsed0 else renderParsedFileIn d parsed0
   parsed <-
     first (compileErrorsToApi "parse" mix Nothing . pure) $
       parsePlaylist "<playlist>" mix

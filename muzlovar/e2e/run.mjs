@@ -1604,6 +1604,49 @@ const localeScenarios = [
       assert((await page.$eval('#e-rules .vcond:first-child', (e) => e.textContent)).includes('за 1 день'), 'Russian singular day');
     },
   },
+  {
+    name: '26. independent UI and DSL languages, English .mix persistence',
+    url: '/edit/e2e-dnd', ready: '#e-tree .group-root', locale: 'ru-RU', storedLocale: null,
+    fn: async (page) => {
+      await page.waitForFunction(() => document.getElementById('e-preview').textContent.length > 0);
+      await page.click('[data-tab="mix"]');
+      assert(await page.$eval('#dsl-locale', (e) => e.value) === 'ru', 'existing RU .mix dialect');
+      const ruMix = await page.$eval('#e-preview', (e) => e.textContent);
+      const nsp = await page.$eval('#e-preview-nsp', (e) => e.textContent);
+      assert(ruMix.includes('где '), 'RU preview');
+      for (const ui of ['en', 'ru']) {
+        await page.selectOption('#ui-locale', ui);
+        assert(await page.$eval('#dsl-locale', (e) => e.value) === 'ru', 'UI switch changed DSL choice');
+        await page.waitForFunction(() => document.getElementById('e-preview').textContent.includes('где '));
+        assert(await page.$eval('#e-preview', (e) => e.textContent) === ruMix, 'UI changed .mix');
+        for (const dialect of ['en', 'ru']) {
+          await page.selectOption('#dsl-locale', dialect);
+          await page.waitForFunction((d) => document.getElementById('e-preview').textContent.includes(d === 'en' ? 'where ' : 'где '), dialect);
+          const mix = await page.$eval('#e-preview', (e) => e.textContent);
+          assert(dialect === 'en' ? mix.includes('where ') && mix.includes('year ') : mix === ruMix, 'wrong DSL preview ' + ui + '/' + dialect);
+          assert(await page.$eval('#e-preview-nsp', (e) => e.textContent) === nsp, '.nsp changed with DSL ' + ui + '/' + dialect);
+        }
+      }
+      await page.selectOption('#dsl-locale', 'en');
+      await page.waitForFunction(() => document.getElementById('e-preview').textContent.includes('where '));
+      await page.reload({waitUntil:'networkidle'});
+      assert(await page.$eval('#dsl-locale', (e) => e.value) === 'en', 'explicit DSL preference not restored');
+      const detail = await (await page.request.get(new URL('/api/playlists/e2e-dnd', page.url()).href)).json();
+      const dto = {...detail.playlist, name:'Bilingual E2E'};
+      const validateRu = await (await page.request.post(new URL('/api/validate?dsl=ru', page.url()).href, {data:dto})).json();
+      const validateEn = await (await page.request.post(new URL('/api/validate?dsl=en', page.url()).href, {data:dto})).json();
+      assert(validateRu.nsp === validateEn.nsp, 'API .nsp differs across dialects');
+      assert(validateRu.mix !== validateEn.mix && validateEn.mix.includes('where '), 'API English .mix');
+      const saved = await page.request.post(new URL('/api/playlists?dsl=en', page.url()).href, {data:dto});
+      assert(saved.ok(), 'English publish: ' + await saved.text());
+      const reopened = await (await page.request.get(new URL('/api/playlists/bilingual-e2e', page.url()).href)).json();
+      assert(reopened.mixDialect === 'en' && reopened.mix === validateEn.mix, 'English .mix not persisted');
+      assert(reopened.nsp === validateEn.nsp, 'published .nsp mismatch');
+      await page.goto(new URL('/edit/bilingual-e2e', page.url()).href, {waitUntil:'networkidle'});
+      await page.waitForFunction(() => document.getElementById('e-preview').textContent.includes('where '));
+      assert(await page.$eval('#dsl-locale', (e) => e.value) === 'en', 'reopened English dialect');
+    },
+  },
 ];
 const allScenarios = [...scenarios, ...layoutScenarios, ...pageLayoutScenarios, ...headerScenarios, ...localeScenarios];
 
@@ -1626,7 +1669,7 @@ async function main() {
       process.exit(1);
     }
   }
-  const lb = spawnSync("cabal list-bin exe:muzlovar", {
+  const lb = process.env.MUZLOVAR_E2E_EXE ? { status: 0, stdout: process.env.MUZLOVAR_E2E_EXE } : spawnSync("cabal list-bin exe:muzlovar", {
     cwd: repoRoot,
     shell: true,
     encoding: "utf8",

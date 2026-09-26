@@ -50,6 +50,8 @@ module Nspeller.Muzlovar.Store
   , publishPlaylist
   , publishPlaylistFrom
   , publishPlaylistWith
+  , publishPlaylistIn
+  , publishPlaylistFromIn
   , deletePlaylistFiles
 
     -- * Состояние публикации (persisted state)
@@ -108,6 +110,8 @@ import Data.Time.Format (defaultTimeLocale, formatTime)
 import Data.Word (Word8, Word64)
 import Numeric (showHex)
 import Nspeller.Ast (formatNumber)
+import Nspeller.Dialect (DslDialect (..), dialectText)
+import Nspeller.Parser (detectDslDialect)
 import Nspeller.Muzlovar.Types
   ( ApiError (..)
   , Compiled (..)
@@ -117,7 +121,7 @@ import Nspeller.Muzlovar.Types
   , PlaylistDto (..)
   , SortDto (..)
   , SortItemDto (..)
-  , compilePlaylistDto
+  , compilePlaylistDtoIn
   , dtoFromMix
   , dtoToParsed
   , nspToDto
@@ -383,6 +387,7 @@ instance ToJSON PlaylistDetail where
       , "external" .= pdRaw d
       , "editable" .= not (pdRaw d)
       , "mix" .= pdMix d
+      , "mixDialect" .= (dialectText <$> detectDslDialect "<playlist>" (pdMix d))
       , "nsp" .= pdNsp d
       ]
 
@@ -1098,6 +1103,10 @@ publishPlaylist ::
   IO (Either StoreError PlaylistDetail)
 publishPlaylist cfg = publishPlaylistFrom cfg Nothing
 
+publishPlaylistIn ::
+  DslDialect -> StoreConfig -> Text -> Bool -> PlaylistDto -> IO (Either StoreError PlaylistDetail)
+publishPlaylistIn d cfg = publishPlaylistFromIn d cfg Nothing
+
 -- | Публикация с указанием прежнего slug подборки (из адреса
 -- @PUT /api/playlists/:slug@). Если итоговый slug изменился
 -- (переименование), после успешной записи новых файлов удаляются
@@ -1113,6 +1122,10 @@ publishPlaylistFrom ::
   IO (Either StoreError PlaylistDetail)
 publishPlaylistFrom cfg mPrev = publishPlaylistWith removeFile cfg mPrev
 
+publishPlaylistFromIn ::
+  DslDialect -> StoreConfig -> Maybe Text -> Text -> Bool -> PlaylistDto -> IO (Either StoreError PlaylistDetail)
+publishPlaylistFromIn d cfg mPrev = publishPlaylistWithIn d removeFile cfg mPrev
+
 -- | Как 'publishPlaylistFrom', но с подменяемым удалением старых
 -- файлов — шов для тестов: позволяет воспроизвести сбой cleanup,
 -- не завися от ОС и прав на файлы.
@@ -1125,6 +1138,11 @@ publishPlaylistWith ::
   PlaylistDto ->
   IO (Either StoreError PlaylistDetail)
 publishPlaylistWith removeFn cfg mPrev slug overwrite dto = do
+  publishPlaylistWithIn Ru removeFn cfg mPrev slug overwrite dto
+
+publishPlaylistWithIn ::
+  DslDialect -> (FilePath -> IO ()) -> StoreConfig -> Maybe Text -> Text -> Bool -> PlaylistDto -> IO (Either StoreError PlaylistDetail)
+publishPlaylistWithIn d removeFn cfg mPrev slug overwrite dto = do
   ed <- ensureStoreDirs cfg
   case ed of
     Left e -> pure (Left e)
@@ -1145,7 +1163,7 @@ publishPlaylistWith removeFn cfg mPrev slug overwrite dto = do
                   exNsp <- doesFileExist nspT
                   if (exMix || exNsp) && not overwrite
                     then pure (Left (StoreConflict slug))
-                    else case compilePlaylistDto dto of
+                    else case compilePlaylistDtoIn d dto of
                       Left errs -> pure (Left (StoreInvalid slug errs))
                       Right compiled -> do
                         let mixBs = encodeUtf8 (cmpMix compiled)

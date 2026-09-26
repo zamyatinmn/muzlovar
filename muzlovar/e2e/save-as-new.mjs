@@ -502,7 +502,7 @@ async function main() {
       process.exit(1);
     }
   }
-  const lb = spawnSync("cabal list-bin exe:muzlovar", {
+  const lb = process.env.MUZLOVAR_E2E_EXE ? { status: 0, stdout: process.env.MUZLOVAR_E2E_EXE } : spawnSync("cabal list-bin exe:muzlovar", {
     cwd: repoRoot,
     shell: true,
     encoding: "utf8",

@@ -56,6 +56,7 @@ import Network.HTTP.Types.Status
   )
 import Network.Wai (Application, Middleware, pathInfo, requestHeaders, responseLBS)
 import qualified Nspeller.Muzlovar.Assets as Assets
+import Nspeller.Dialect (DslDialect (..), parseDialect)
 import Nspeller.Muzlovar.Html (editorPage, errorPage, indexPage, renderHtml, trashPage)
 import Nspeller.Muzlovar.Store
   ( PlaylistDetail (pdEntry, pdRaw)
@@ -65,8 +66,8 @@ import Nspeller.Muzlovar.Store
   , deletePlaylistFiles
   , listPlaylists
   , listTrash
-  , publishPlaylist
-  , publishPlaylistFrom
+  , publishPlaylistIn
+  , publishPlaylistFromIn
   , purgeTrash
   , readPlaylist
   , restoreTrash
@@ -84,7 +85,7 @@ import Nspeller.Muzlovar.Types
   , Compiled (cmpMix, cmpNsp)
   , PlaylistDto
   , apiError
-  , compilePlaylistDtoWarnings
+  , compilePlaylistDtoWarningsIn
   , pdName
   )
 import Nspeller.Schema (schemaJson)
@@ -251,10 +252,11 @@ routes cfg = do
     either respondStoreError (\xs -> json (object ["playlists" .= xs])) r
 
   post "/api/validate" $ do
+    dialect <- requestedDialect
     parsed <- parseDtoBody
     case parsed of
       Left errs -> respondErrors status422 errs
-      Right dto -> case compilePlaylistDtoWarnings dto of
+      Right dto -> case compilePlaylistDtoWarningsIn dialect dto of
         Left errs -> respondErrors status422 errs
         Right (compiled, warns) ->
           json $
@@ -273,13 +275,14 @@ routes cfg = do
               ]
 
   post "/api/playlists" $ do
+    dialect <- requestedDialect
     parsed <- parseDtoBody
     case parsed of
       Left errs -> respondErrors status422 errs
       Right dto -> do
         overwrite <- overwriteRequested
         let slug = slugFromName (pdName dto)
-        r <- liftIO (publishPlaylist (scStoreCfg cfg) slug overwrite dto)
+        r <- liftIO (publishPlaylistIn dialect (scStoreCfg cfg) slug overwrite dto)
         case r of
           Left e -> respondStoreError e
           Right d -> do
@@ -292,6 +295,7 @@ routes cfg = do
     either respondStoreError json r
 
   put "/api/playlists/:slug" $ do
+    dialect <- requestedDialect
     slug <- pathParam "slug"
     detail <- liftIO (readPlaylist (scStoreCfg cfg) slug)
     case detail of
@@ -317,7 +321,7 @@ routes cfg = do
                 let target = slugFromName (pdName dto)
                 r <-
                   liftIO
-                    (publishPlaylistFrom (scStoreCfg cfg) (Just slug) target overwrite dto)
+                    (publishPlaylistFromIn dialect (scStoreCfg cfg) (Just slug) target overwrite dto)
                 either respondStoreError json r
 
   delete "/api/playlists/:slug" $ do
@@ -447,6 +451,12 @@ overwriteRequested :: ActionM Bool
 overwriteRequested = do
   v <- queryParamMaybe "overwrite" :: ActionM (Maybe Text)
   pure (maybe False (`elem` ["1", "true", "yes", "on"]) v)
+
+-- Existing API callers keep the historical Russian .mix output.
+requestedDialect :: ActionM DslDialect
+requestedDialect = do
+  v <- queryParamMaybe "dsl" :: ActionM (Maybe Text)
+  pure (fromMaybe Ru (v >>= parseDialect))
 
 ------------------------------------------------------------------------------
 -- Subsonic: честный статус синхронизации

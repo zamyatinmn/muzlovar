@@ -3,6 +3,7 @@
 module Main (main) where
 
 import DtoTests (dtoTests)
+import BilingualTests (bilingualTests)
 import GoldenTests (goldenTests)
 import Properties (propertyTests)
 import RoundTripTests (roundTripTests)
@@ -19,6 +20,7 @@ main =
     testGroup
       "nspeller"
       [ unitTests
+      , bilingualTests
       , propertyTests
       , goldenTests
       , dtoTests

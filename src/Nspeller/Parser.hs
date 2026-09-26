@@ -9,6 +9,8 @@
 -- фрагментом исходника.
 module Nspeller.Parser
   ( parsePlaylist
+  , parsePlaylistIn
+  , detectDslDialect
   ) where
 
 import Control.Monad (void)
@@ -25,6 +27,7 @@ import qualified Text.Megaparsec as MP
 import Text.Megaparsec (Parsec, (<?>), (<|>))
 import qualified Text.Megaparsec.Char as MPC
 import Nspeller.Ast
+import Nspeller.Dialect
 
 -- | Тип потока DSL: символы 'Text', синтаксические ошибки без
 -- компонентов пользователя.
@@ -37,15 +40,58 @@ type Parser = Parsec Void Text
 -- | Разбирает содержимое файла. Синтаксические ошибки превращаются
 -- в 'CompileError' с позицией и фрагментом исходника.
 parsePlaylist :: FilePath -> Text -> Either CompileError ParsedFile
-parsePlaylist fp src =
-  case MP.runParser fileP fp src of
+parsePlaylist = parsePlaylistWith [Ru, En]
+
+-- | Restricted mode is used only to identify a uniformly written source.
+-- The public parser accepts both dialects, including mixed documents.
+parsePlaylistIn :: DslDialect -> FilePath -> Text -> Either CompileError ParsedFile
+parsePlaylistIn d = parsePlaylistWith [d]
+
+-- | A mixed or unrecognised source has no single dialect. This is used
+-- only for display preferences; parsing itself accepts mixed syntax.
+detectDslDialect :: FilePath -> Text -> Maybe DslDialect
+detectDslDialect fp src = case [d | d <- [Ru, En], matches d] of
+  [d] -> Just d
+  _ -> Nothing
+  where
+    matches d = case parsePlaylistIn d fp src of
+      Right (ParsedFile stmts) -> all (statementFields d . locValue) stmts
+      Left _ -> False
+    statementFields d = \case
+      SWhere g -> groupFields d g
+      SSort (SortSpec xs) -> all (sortField d . locValue) xs
+      _ -> True
+    groupFields d (LogicGroup _ xs) = all (itemFields d . locValue) xs
+    itemFields d = \case
+      CIGroup g -> groupFields d g
+      CICond c -> maybe True (fieldToken d) (condName c)
+    sortField d (RawSortItem name _) = fieldToken d name
+    condName = \case
+      RBare n -> Just n
+      RBin n _ _ -> Just n
+      RBetween n _ _ -> Just n
+      RPresence n _ -> Just n
+      RRelative n _ -> Just n
+      RNotRelative n _ -> Just n
+      RDateBetween n _ _ -> Just n
+      _ -> Nothing
+    fieldToken d n = case fieldByName n of
+      Just (SomeField f)
+        | fieldDslName f == fieldName f -> True
+        | d == Ru -> n /= fieldName f
+        | otherwise -> n /= fieldDslName f
+      Nothing -> False
+
+parsePlaylistWith :: [DslDialect] -> FilePath -> Text -> Either CompileError ParsedFile
+parsePlaylistWith dialects fp src =
+  case MP.runParser (fileP dialects) fp src of
     Left bundle -> Left (bundleToError fp src bundle)
     Right stmts -> Right (ParsedFile stmts)
 
 -- | Секции верхнего уровня; пустой файл здесь не ошибка — об отсутствии
 -- обязательных секций сообщит валидация.
-fileP :: Parser [Located Statement]
-fileP = spaceConsumer *> MP.many (located statement) <* MP.eof
+fileP :: [DslDialect] -> Parser [Located Statement]
+fileP ds = spaceConsumer *> MP.many (located (statement ds)) <* MP.eof
 
 -- | Оборачивает парсер, запоминая смещения начала и конца элемента.
 located :: Parser a -> Parser (Located a)
@@ -83,6 +129,15 @@ kw :: Text -> Parser ()
 kw w = lexeme (void (MP.try (MPC.string w <* notIdentChar)))
   where
     notIdentChar = MP.notFollowedBy (MP.satisfy isIdentChar <?> "идентификатор")
+
+-- | Parse an entire phrase, with normal DSL whitespace between words.
+-- Trying the complete phrase prevents a short prefix from committing a
+-- longer operator (for example, Russian «не» or English «not»).
+kwDsl :: [DslDialect] -> DslKeyword -> Parser ()
+kwDsl ds key = MP.choice [MP.try (mapM_ kw (T.words (keyword d key))) | d <- ds]
+
+daysDsl :: [DslDialect] -> Parser ()
+daysDsl ds = kwDsl ds KDays <|> (if En `elem` ds then kw "day" else MP.empty)
 
 isIdentChar :: Char -> Bool
 isIdentChar c = isAlphaNum c || c == '_'
@@ -193,11 +248,11 @@ dateP = lexeme rawDate <?> "дата в формате ГГГГ-ММ-ДД"
 -- Дата стоит перед числом: её форма (@4 цифры @-@ @2 цифры @-@
 -- @2 цифры@) не совпадает с числом, но разбор идёт слева направо
 -- и незнакомый операнд должен падать на самом ожидаемом токене.
-valueP :: Parser RawValue
-valueP =
+valueP :: [DslDialect] -> Parser RawValue
+valueP ds =
   MP.choice
-    [ RVBool True <$ kw "да"
-    , RVBool False <$ kw "нет"
+    [ RVBool True <$ kwDsl ds KTrue
+    , RVBool False <$ kwDsl ds KFalse
     , RVText <$> stringP
     , RVDate <$> dateP
     , RVNumber <$> numberP
@@ -207,61 +262,61 @@ valueP =
 -- Секции верхнего уровня
 ------------------------------------------------------------------------------
 
-statement :: Parser Statement
-statement =
+statement :: [DslDialect] -> Parser Statement
+statement ds =
   MP.choice
-    [ SName <$> (kw "подборка" *> stringP)
-    , SDescription <$> (kw "описание" *> stringP)
-    , SPublic <$ kw "публичная"
-    , SWhere <$> (kw "где" *> logicGroupP)
-    , SSort <$> sortSectionP
-    , SLimit <$> (kw "лимит" *> intP)
+    [ SName <$> (kwDsl ds KPlaylist *> stringP)
+    , SDescription <$> (kwDsl ds KDescription *> stringP)
+    , SPublic <$ kwDsl ds KPublic
+    , SWhere <$> (kwDsl ds KWhere *> logicGroupP ds)
+    , SSort <$> sortSectionP ds
+    , SLimit <$> (kwDsl ds KLimit *> intP)
     ]
 
 -- | Группа условий: обязательные фигурные скобки и хотя бы одно условие.
-logicGroupP :: Parser LogicGroup
-logicGroupP = do
-  kind <- MP.choice [All <$ kw "все", Any <$ kw "любое"] <?> "«все» или «любое»"
-  items <- symbol "{" *> MP.some (located condItemP) <* symbol "}"
+logicGroupP :: [DslDialect] -> Parser LogicGroup
+logicGroupP ds = do
+  kind <- MP.choice [All <$ kwDsl ds KAll, Any <$ kwDsl ds KAny] <?> "«все»/«all» или «любое»/«any»"
+  items <- symbol "{" *> MP.some (located (condItemP ds)) <* symbol "}"
   pure (LogicGroup kind items)
 
-sortSectionP :: Parser RawSort
-sortSectionP = do
-  kw "порядок"
+sortSectionP :: [DslDialect] -> Parser RawSort
+sortSectionP ds = do
+  kwDsl ds KSort
   MP.choice
-    [ SortRandom <$ kw "случайный"
-    , SortSpec <$> (symbol "{" *> MP.some (located sortItemP) <* symbol "}")
+    [ SortRandom <$ kwDsl ds KRandom
+    , SortSpec <$> (symbol "{" *> MP.some (located (sortItemP ds)) <* symbol "}")
     ]
     <?> "«случайный» или блок с полями"
 
-sortItemP :: Parser RawSortItem
-sortItemP = do
+sortItemP :: [DslDialect] -> Parser RawSortItem
+sortItemP ds = do
   name <- ident
-  dir <- MP.choice [Descending <$ kw "убыв", Ascending <$ kw "возр"] <?> "«возр» или «убыв»"
+  dir <- MP.choice [Descending <$ kwDsl ds KDescending, Ascending <$ kwDsl ds KAscending] <?> "направление сортировки"
   pure (RawSortItem name dir)
 
 ------------------------------------------------------------------------------
 -- Условия
 ------------------------------------------------------------------------------
 
-condItemP :: Parser CondItem
-condItemP =
+condItemP :: [DslDialect] -> Parser CondItem
+condItemP ds =
   MP.choice
-    [ CIGroup <$> logicGroupP
-    , CICond <$> notPlayedP
-    , CICond <$> playlistP
-    , CICond <$> condP
+    [ CIGroup <$> logicGroupP ds
+    , CICond <$> notPlayedP ds
+    , CICond <$> playlistP ds
+    , CICond <$> condP ds
     ]
     <?> "условие"
 
 -- | @не звучало 90 дней@. Откат (@try@) нужен только до момента
 -- распознавания сочетания «не звучало»: слово @не@ может быть началом
 -- идентификатора или частью условия вида «поле не содержит …».
-notPlayedP :: Parser RawCond
-notPlayedP =
-  MP.try (kw "не" *> kw "звучало")
+notPlayedP :: [DslDialect] -> Parser RawCond
+notPlayedP ds =
+  kwDsl ds KNotPlayed
     *> (RNotPlayed <$> intP)
-    <* kw "дней"
+    <* daysDsl ds
 
 -- | Начало формы @не звучало N дней@ — только проверка, без разбора.
 -- Под 'MP.try': @не@ здесь съедается, и без отката следующая
@@ -270,36 +325,36 @@ notPlayedP =
 -- условия его лексема переносит позицию на следующую строку: если та
 -- начинается с @не звучало@, это СЛЕДУЮЩЕЕ условие, а не оператор
 -- «не содержит» у предыдущего.
-notPlayedAhead :: Parser ()
-notPlayedAhead = MP.try (kw "не" *> kw "звучало")
+notPlayedAhead :: [DslDialect] -> Parser ()
+notPlayedAhead ds = MP.try (kwDsl ds KNotPlayed)
 
 -- | Начало формы @не в подборке …@ — только проверка, без разбора.
 -- Та же роль, что у 'notPlayedAhead': после булева условия без
 -- значения лексема стоит на следующей строке, и @не в подборке@ там
 -- является новым условием, а не оператором «не содержит» предыдущего.
-playlistNotAhead :: Parser ()
-playlistNotAhead = MP.try (kw "не" *> kw "в" *> kw "подборке")
+playlistNotAhead :: [DslDialect] -> Parser ()
+playlistNotAhead ds = MP.try (kwDsl ds KNotInPlaylist)
 
 -- | Членство в подборке: @в подборке id "…"@, @не в подборке файл
 -- "…"@. Многословные формы фиксируются под 'MP.try': слово @в@ —
 -- начало идентификатора, а @не@ может быть частью условия «поле не
 -- содержит …» (оно разбирается в 'condP' после неудачи здесь).
-playlistP :: Parser RawCond
-playlistP =
-  playlistNotAhead *> (RPlaylist NotInPlaylist <$> playlistRefP)
-    <|> (kw "в" *> kw "подборке" *> (RPlaylist InPlaylist <$> playlistRefP))
+playlistP :: [DslDialect] -> Parser RawCond
+playlistP ds =
+  playlistNotAhead ds *> (RPlaylist NotInPlaylist <$> playlistRefP ds)
+    <|> (kwDsl ds KInPlaylist *> (RPlaylist InPlaylist <$> playlistRefP ds))
 
 -- | Вид ссылки на подборку и её значение-строка.
-playlistRefP :: Parser PlaylistRef
-playlistRefP =
+playlistRefP :: [DslDialect] -> Parser PlaylistRef
+playlistRefP ds =
   PlaylistRef
-    <$> MP.choice [RefId <$ kw "id", RefPath <$ kw "файл"]
+    <$> MP.choice [RefId <$ kwDsl ds KRefId, RefPath <$ kwDsl ds KRefFile]
     <*> stringP
 
-condP :: Parser RawCond
-condP = do
+condP :: [DslDialect] -> Parser RawCond
+condP ds = do
   name <- ident
-  condAfterFieldP name
+  condAfterFieldP ds name
 
 -- | Операторы после имени поля. Многословные операторы фиксируются
 -- после первого слова: это даёт точные ошибки вроде
@@ -307,41 +362,40 @@ condP = do
 -- исключение — «не» в начале форм @не звучало@ и @не в подборке@
 -- (см. 'notPlayedAhead', 'playlistNotAhead'): их нельзя принимать
 -- за начало «не содержит».
-condAfterFieldP :: Text -> Parser RawCond
-condAfterFieldP name =
+condAfterFieldP :: [DslDialect] -> Text -> Parser RawCond
+condAfterFieldP ds name =
   MP.choice
     [ -- «между» двух дат — до числового «между»: @try@ откатывает
       -- разбор, если после ключевого слова стоит не дата, и числовой
       -- вариант получает шанс (@рейтинг между 1 и 2@).
-      RDateBetween name <$> MP.try (kw "между" *> dateP) <*> (kw "и" *> dateP)
-    , RBetween name <$> (kw "между" *> numberP) <*> (kw "и" *> numberP)
+      RDateBetween name <$> MP.try (kwDsl ds KBetween *> dateP) <*> (kwDsl ds KAnd *> dateP)
+    , RBetween name <$> (kwDsl ds KBetween *> numberP) <*> (kwDsl ds KAnd *> numberP)
     , -- «поле не за N дней»: @не@ здесь не начало «не_contains»,
       -- поэтому форма фиксируется до разбора операторов текста.
       -- Откат до момента распознавания «не за» сохраняет разбор
       -- «поле не содержит …».
-      RNotRelative name <$> MP.try (kw "не" *> kw "за" *> intP) <* kw "дней"
+      RNotRelative name <$> (kwDsl ds KNotWithin *> intP) <* daysDsl ds
     , -- «до»/«после» принимают только дату: после ключевого слова
       -- разбор уже не откатывается — ошибка сразу называет формат.
-      RBin name OpBefore . RVDate <$> (kw "до" *> dateP)
-    , RBin name OpAfter . RVDate <$> (kw "после" *> dateP)
+      RBin name OpBefore . RVDate <$> (kwDsl ds KBefore *> dateP)
+    , RBin name OpAfter . RVDate <$> (kwDsl ds KAfter *> dateP)
     , RBin name OpNotContains
-        <$> ( MP.notFollowedBy (notPlayedAhead <|> playlistNotAhead)
-                *> kw "не"
-                *> kw "содержит"
-                *> valueP
+        <$> ( MP.notFollowedBy (notPlayedAhead ds <|> playlistNotAhead ds)
+                *> kwDsl ds KNotContains
+                *> valueP ds
             )
-    , RBin name OpStartsWith <$> (kw "начинается" *> kw "с" *> valueP)
-    , RBin name OpEndsWith <$> (kw "заканчивается" *> kw "на" *> valueP)
-    , RBin name OpContains <$> (kw "содержит" *> valueP)
-    , RPresence name Absent <$ kw "отсутствует"
-    , RPresence name Present <$ kw "присутствует"
-    , RRelative name <$> (kw "за" *> intP) <* kw "дней"
-    , RBin name OpNe <$> (symbol "!=" *> valueP)
-    , RBin name OpEq <$> (symbol "=" *> valueP)
-    , RBin name OpGe <$> (symbol ">=" *> valueP)
-    , RBin name OpGt <$> (symbol ">" *> valueP)
-    , RBin name OpLe <$> (symbol "<=" *> valueP)
-    , RBin name OpLt <$> (symbol "<" *> valueP)
+    , RBin name OpStartsWith <$> (kwDsl ds KStartsWith *> valueP ds)
+    , RBin name OpEndsWith <$> (kwDsl ds KEndsWith *> valueP ds)
+    , RBin name OpContains <$> (kwDsl ds KContains *> valueP ds)
+    , RPresence name Absent <$ kwDsl ds KMissing
+    , RPresence name Present <$ kwDsl ds KPresent
+    , RRelative name <$> (kwDsl ds KWithin *> intP) <* daysDsl ds
+    , RBin name OpNe <$> (symbol "!=" *> valueP ds)
+    , RBin name OpEq <$> (symbol "=" *> valueP ds)
+    , RBin name OpGe <$> (symbol ">=" *> valueP ds)
+    , RBin name OpGt <$> (symbol ">" *> valueP ds)
+    , RBin name OpLe <$> (symbol "<=" *> valueP ds)
+    , RBin name OpLt <$> (symbol "<" *> valueP ds)
     , pure (RBare name)
     ]
 
