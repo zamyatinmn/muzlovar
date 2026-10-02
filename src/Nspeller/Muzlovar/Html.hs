@@ -27,6 +27,8 @@ import Data.Time.Clock (UTCTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import Lucid.Base (Html, Term (term), makeAttribute, renderText, toHtml)
 import Lucid.Html5
+import Network.HTTP.Types.URI (urlEncode)
+import Data.Text.Encoding (encodeUtf8, decodeUtf8)
 import Nspeller.Muzlovar.Store (PlaylistEntry (..), TrashEntry (..))
 
 -- | HTML-документ в тексте.
@@ -244,13 +246,14 @@ indexPage entries =
                         "Создать первую подборку →"
                     )
               )
-          else table_ [class_ "list"] (headerRow <> rows)
+          else table_ [class_ "list playlist-list"] (headerRow <> rows)
     )
   where
     headerRow =
       thead_
         ( tr_
-            ( th_ "Название"
+            ( th_ [class_ "artwork-cell", makeAttribute "aria-label" "Обложка"] mempty
+                <> th_ "Название"
                 <> th_ "Описание"
                 <> th_ "Файл"
                 <> th_ "Свойства"
@@ -268,7 +271,11 @@ indexPage entries =
     entryRow e =
       tr_
         [makeAttribute "data-playlist-slug" (peSlug e)]
-        ( td_ [class_ "title"] (toHtml (peTitle e))
+        ( td_ [class_ "artwork-cell"]
+            (if peArtwork e then img_ [class_ "list-artwork", alt_ "", src_ ("/api/playlists/" <> decodeUtf8 (urlEncode True (encodeUtf8 (peSlug e))) <> "/artwork"), makeAttribute "loading" "lazy"] else mempty)
+            <> td_ [class_ "title"]
+            (div_ [class_ "playlist-title-row"]
+              (span_ [class_ "playlist-title-text", makeAttribute "title" (peTitle e)] (toHtml (peTitle e))))
             <> td_ [class_ "desc"] (toHtml (peDescription e))
             <> td_
               [class_ "file"]
@@ -277,7 +284,7 @@ indexPage entries =
                   <> maybe mempty toHtml (peNspFile e)
               )
             <> td_ properties
-            <> td_ (toHtml (peSort e))
+            <> td_ [class_ "playlist-sort"] (toHtml (peSort e))
             <> td_ [class_ "summary"] (toHtml (peSummary e))
             <> td_ status
             <> td_ (toHtml (formatModified (peModified e)))
@@ -462,6 +469,22 @@ editorPage mslug publishedPath publishDir =
                   -- Карточка подборки и статус проверки — смысл колонки,
                   -- поэтому они идут сразу; технический код ниже.
                   <> playlistCard
+                  <> section_ [class_ "block artwork-block"]
+                    ( blockHead "Обложка" mempty
+                        <> div_ [class_ "artwork-preview"]
+                          ( button_ [id_ "e-artwork-picker", type_ "button", class_ "artwork-picker", makeAttribute "aria-label" "Добавить обложку"]
+                            ( img_ [id_ "e-artwork-image", alt_ "", makeAttribute "hidden" "hidden"]
+                              <> span_ [id_ "e-artwork-placeholder", class_ "artwork-placeholder"]
+                                (span_ [class_ "artwork-add-icon", makeAttribute "aria-hidden" "true"] "+"
+                                  <> span_ [class_ "artwork-add-label"] "Добавить обложку")
+                              <> span_ [class_ "artwork-overlay", makeAttribute "aria-hidden" "true"] "Изменить" )
+                            <> button_ [id_ "e-artwork-remove", type_ "button", class_ "artwork-remove", makeAttribute "aria-label" "Удалить обложку", makeAttribute "title" "Удалить обложку", makeAttribute "hidden" "hidden"] trashIcon
+                          )
+                        <> input_ [id_ "e-artwork-file", type_ "file", makeAttribute "hidden" "hidden", makeAttribute "accept" ".jpg,.jpeg,.png,.webp,.gif,image/jpeg,image/png,image/webp,image/gif"]
+                        <> span_ [id_ "e-artwork-loading", class_ "artwork-loading", makeAttribute "hidden" "hidden", makeAttribute "role" "status"] "Обновляем обложку…"
+                        <> p_ [id_ "e-artwork-message", class_ "artwork-error", makeAttribute "hidden" "hidden", makeAttribute "aria-live" "polite"] ""
+                        <> button_ [id_ "e-artwork-retry", type_ "button", class_ "quiet", makeAttribute "hidden" "hidden"] "Повторить загрузку"
+                    )
                   <> section_
                     [class_ "block"]
                     ( span_ [class_ "block-title"] "Проверка"
@@ -629,13 +652,18 @@ editorPage mslug publishedPath publishDir =
         [class_ "pl-card"]
         ( div_
             [class_ "pl-cover", makeAttribute "aria-hidden" "true"]
-            (span_ "" <> span_ "" <> span_ "" <> span_ "")
+            (img_ [id_ "pl-artwork-image", alt_ "", makeAttribute "hidden" "hidden"] <> span_ "" <> span_ "" <> span_ "" <> span_ "")
             <> div_
               [class_ "pl-info"]
               ( div_ [id_ "pl-title", class_ "pl-title"] "Без названия"
                   <> div_ [id_ "pl-meta", class_ "pl-meta"] "Лимит не задан"
               )
         )
+
+    trashIcon :: Html ()
+    trashIcon = term "svg"
+      [makeAttribute "viewBox" "0 0 24 24", width_ "18", height_ "18", makeAttribute "aria-hidden" "true"]
+      (term "path" [makeAttribute "d" "M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v5M14 11v5", makeAttribute "fill" "none", makeAttribute "stroke" "currentColor", makeAttribute "stroke-width" "1.8", makeAttribute "stroke-linecap" "round", makeAttribute "stroke-linejoin" "round"] (mempty :: Html ()))
 
     -- Деструктивное действие — в самом низу колонки (только если
     -- подборка опубликована).

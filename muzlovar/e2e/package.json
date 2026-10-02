@@ -5,7 +5,8 @@
   "scripts": {
     "test": "node run.mjs",
     "test:publish-rename": "node publish-rename.mjs",
-    "test:save-as-new": "node save-as-new.mjs"
+    "test:save-as-new": "node save-as-new.mjs",
+    "test:artwork": "node artwork.mjs"
   },
   "dependencies": {
     "playwright-core": "1.62.1"

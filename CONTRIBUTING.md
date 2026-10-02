@@ -38,6 +38,7 @@ npm ci
 npm test
 npm run test:publish-rename
 npm run test:save-as-new
+npm run test:artwork
 ```
 
 The E2E runner needs Chrome or Chromium. Set `MUZLOVAR_E2E_CHROME` if it cannot find the browser automatically.

@@ -37,7 +37,8 @@ muzlovarCss = $(embedFile "muzlovar/static/muzlovar.css")
 muzlovarI18n :: ByteString
 muzlovarI18n = $(embedFile "muzlovar/static/i18n.js")
 
--- | Логика редактора (vanilla JS).
+-- | Логика редактора: локальная обложка до публикации, немедленные операции
+-- artwork опубликованных подборок и общий предпросмотр (vanilla JS).
 muzlovarJs :: ByteString
 muzlovarJs = $(embedFile "muzlovar/static/muzlovar.js")
 

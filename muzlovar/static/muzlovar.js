@@ -27,6 +27,11 @@
   var schema = null;
   var model = null;          // PlaylistDto
   var slug = null;           // null — новая подборка
+  var artworkBusy = false;
+  var draftArtwork = null;
+  var draftArtworkUrl = null;
+  var publishBusy = false;
+  var artworkChannel = typeof BroadcastChannel === 'function' ? new BroadcastChannel('muzlovar-artwork') : null;
   var pendingSlug = null;    // slug из последней успешной проверки:
                              // каким станет filename после публикации
   var editable = true;
@@ -597,6 +602,7 @@
           return null;
         }
         var d = res.data;
+        showArtwork(d.entry && d.entry.artwork ? artworkUrl(slug) : null);
         if (d.playlist) model = normalize(d.playlist);
         if (!explicitDslLocale && (d.mixDialect === 'ru' || d.mixDialect === 'en')) {
           dslLocale = d.mixDialect;
@@ -615,6 +621,7 @@
       bindPaletteClicks();
       bindSearch();
       bindForm();
+      bindArtwork();
       renderAll();
       updatePath();
       scheduleValidate(0);
@@ -643,6 +650,116 @@
       scheduleValidate(0);
     });
     host.insertBefore(select, host.lastElementChild);
+  }
+
+  function artworkUrl(target) {
+    return '/api/playlists/' + encodeURIComponent(target) + '/artwork';
+  }
+
+  function showArtwork(url) {
+    var image = document.getElementById('e-artwork-image');
+    var placeholder = document.getElementById('e-artwork-placeholder');
+    if (!image) return;
+    var cardImage = document.getElementById('pl-artwork-image');
+    var area = image.closest('.artwork-preview');
+    function display(source) {
+      image.hidden = !source;
+      placeholder.hidden = !!source;
+      area.classList.toggle('has-artwork', !!source);
+      document.getElementById('e-artwork-remove').hidden = !source;
+      document.getElementById('e-artwork-picker').setAttribute('aria-label', t(source ? 'artwork.change' : 'artwork.add'));
+      [image, cardImage].forEach(function (target) {
+        target.hidden = !source;
+        if (source) target.src = source;
+        else target.removeAttribute('src');
+      });
+      cardImage.parentNode.classList.toggle('has-artwork', !!source);
+    }
+    image.onerror = function () { display(null); };
+    display(url);
+  }
+
+  function artworkMessage(message) {
+    var target = document.getElementById('e-artwork-message');
+    target.textContent = message;
+    target.hidden = !message;
+  }
+
+  function syncArtworkControls() {
+    ['e-artwork-picker', 'e-artwork-file', 'e-artwork-remove'].forEach(function (id) {
+      document.getElementById(id).disabled = artworkBusy || publishBusy;
+    });
+    var area = document.querySelector('.artwork-preview');
+    area.setAttribute('aria-busy', artworkBusy ? 'true' : 'false');
+    document.getElementById('e-artwork-loading').hidden = !artworkBusy;
+    var retry = document.getElementById('e-artwork-retry');
+    retry.hidden = !draftArtwork || !isPublished();
+    retry.disabled = artworkBusy || publishBusy;
+  }
+
+  function setDraftArtwork(file) {
+    if (draftArtworkUrl) URL.revokeObjectURL(draftArtworkUrl);
+    draftArtwork = file;
+    draftArtworkUrl = file ? URL.createObjectURL(file) : null;
+    showArtwork(draftArtworkUrl);
+    artworkMessage('');
+    syncArtworkControls();
+  }
+
+  function bindArtwork() {
+    var input = document.getElementById('e-artwork-file');
+    syncArtworkControls();
+    document.getElementById('e-artwork-picker').addEventListener('click', function () {
+      if (!artworkBusy && !publishBusy) input.click();
+    });
+    input.addEventListener('change', function () {
+      var file = input.files[0];
+      input.value = '';
+      if (!file || artworkBusy || publishBusy) return;
+      if (file.size > 10 * 1024 * 1024) { artworkMessage(t('artwork.large')); return; }
+      if (isPublished()) changeArtwork(file);
+      else setDraftArtwork(file);
+    });
+    document.getElementById('e-artwork-remove').addEventListener('click', function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!artworkBusy && !publishBusy) {
+        if (isPublished()) changeArtwork(null);
+        else setDraftArtwork(null);
+      }
+    });
+    document.getElementById('e-artwork-retry').addEventListener('click', function () {
+      if (!artworkBusy && !publishBusy && draftArtwork) changeArtwork(draftArtwork);
+    });
+  }
+
+  async function changeArtwork(file) {
+    var target = slug;
+    artworkBusy = true;
+    artworkMessage('');
+    syncArtworkControls();
+    try {
+      var response = await fetch(artworkUrl(target), {
+        method: file ? 'PUT' : 'DELETE',
+        headers: file ? {'Content-Type': file.type || 'application/octet-stream'} : {},
+        body: file || undefined
+      });
+      if (!response.ok) {
+        var data = await response.json().catch(function () { return {}; });
+        throw new Error(errorText({data:data, status:response.status}));
+      }
+      // Existing covers stay visible until the mutation succeeds.
+      if (target === slug) showArtwork(file ? artworkUrl(target) + '?v=' + Date.now() : null);
+      if (draftArtworkUrl) URL.revokeObjectURL(draftArtworkUrl);
+      draftArtwork = null;
+      draftArtworkUrl = null;
+      if (artworkChannel) artworkChannel.postMessage({slug:target, artwork:!!file});
+    } catch (e) {
+      artworkMessage(t(draftArtwork ? 'artwork.publishPartial' : 'artwork.failed') + ' ' + e.message);
+    } finally {
+      artworkBusy = false;
+      syncArtworkControls();
+    }
   }
 
   function errorText(res) {
@@ -1929,6 +2046,9 @@
   }
 
   function sendPublish(overwrite, asNew) {
+    if (publishBusy || artworkBusy) return;
+    publishBusy = true;
+    syncArtworkControls();
     // Как и раньше: обновление идёт по slug открытой подборки, create —
     // без него. «Сохранить как новую» всегда идёт в create, даже когда
     // открытая подборка уже опубликована.
@@ -1937,10 +2057,17 @@
       ? '/api/playlists' + (overwrite ? '?overwrite=1' : '')
       : '/api/playlists/' + encodeURIComponent(slug) + (overwrite ? '?overwrite=1' : '');
     url += (url.indexOf('?') < 0 ? '?' : '&') + dslQuery();
-    api(url, { method: create ? 'POST' : 'PUT', body: model }).then(function (res) {
+    // Duplicates retain the original bytes; no sidecar is written until POST succeeds.
+    var cover = Promise.resolve(asNew || !isPublished() ? draftArtwork : null);
+    if (asNew && !draftArtwork && !document.getElementById('e-artwork-image').hidden) {
+      cover = fetch(artworkUrl(slug)).then(function (response) {
+        if (!response.ok) throw new Error(t('artwork.failed'));
+        return response.blob();
+      });
+    }
+    cover.then(function (file) {
+      return api(url, { method: create ? 'POST' : 'PUT', body: model }).then(async function (res) {
       if (res.ok) {
-        toast('ok', t(asNew ? 'message.savedNew' : 'message.published',
-          {name:res.data.entry ? res.data.entry.name : ''}));
         var entry = res.data.entry || null;
         var newSlug = entry ? entry.slug : slug;
         if (newSlug && newSlug !== slug) {
@@ -1966,6 +2093,13 @@
         pendingSlug = slug;
         updatePath();
         syncPublishButtons();
+        if (file) {
+          if (!draftArtwork) setDraftArtwork(file);
+          await changeArtwork(file);
+        } else if (!draftArtwork) showArtwork(entry && entry.artwork ? artworkUrl(slug) + '?v=' + Date.now() : null);
+        syncArtworkControls();
+        toast('ok', t(asNew ? 'message.savedNew' : 'message.published',
+          {name:entry ? entry.name : ''}));
         return;
       }
       if (res.status === 409) {
@@ -1980,8 +2114,12 @@
       }
       renderErrors(els['e-errors'], errorsOf(res.data), t('message.publishFailed'));
       toast('error', t('message.publishNotDone'));
+      });
     }).catch(function () {
       toast('error', t('message.serverUnavailable'));
+    }).finally(function () {
+      publishBusy = false;
+      syncArtworkControls();
     });
   }
 
@@ -2004,6 +2142,20 @@
 
   /* Строки списка: кнопки [data-delete] на серверной таблице. */
   function initList() {
+    if (artworkChannel) artworkChannel.onmessage = function (event) {
+      updateListArtwork(event.data.slug, event.data.artwork);
+    };
+    // Refresh artwork when returning to a cached list or another open tab.
+    function refreshArtwork() {
+      if (!document.querySelector('tr[data-playlist-slug]')) return;
+      api('/api/playlists').then(function (res) {
+        if (res.ok) (res.data.playlists || []).forEach(function (entry) {
+          updateListArtwork(entry.slug, entry.artwork);
+        });
+      }).catch(function () { /* keep the existing list on network errors */ });
+    }
+    window.addEventListener('pageshow', function (event) { if (event.persisted) refreshArtwork(); });
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) refreshArtwork(); });
     document.querySelectorAll('[data-delete]').forEach(function (btn) {
       btn.addEventListener('click', function () {
         var target = btn.getAttribute('data-delete');
@@ -2013,6 +2165,16 @@
       });
     });
     localizeList();
+  }
+
+  function updateListArtwork(target, exists) {
+    document.querySelectorAll('tr[data-playlist-slug]').forEach(function (row) {
+      if (row.getAttribute('data-playlist-slug') !== target) return;
+      var cell = row.querySelector('.artwork-cell');
+      if (!cell) return;
+      clear(cell);
+      if (exists) cell.appendChild(el('img', {class:'list-artwork', alt:'', src:artworkUrl(target) + '?v=' + Date.now()}));
+    });
   }
 
   function listSummary(dto) {
@@ -2058,20 +2220,21 @@
     var rows = document.querySelectorAll('tr[data-playlist-slug]');
     if (!rows.length) return;
     rows.forEach(function (row) {
-      var cells = row.querySelectorAll('td');
-      if (cells.length < 6) return;
-      if (!cells[4].hasAttribute('data-ru')) cells[4].setAttribute('data-ru', cells[4].textContent);
-      if (!cells[5].hasAttribute('data-ru')) cells[5].setAttribute('data-ru', cells[5].textContent);
+      var sortCell = row.querySelector('.playlist-sort');
+      var summaryCell = row.querySelector('.summary');
+      if (!sortCell || !summaryCell) return;
+      if (!sortCell.hasAttribute('data-ru')) sortCell.setAttribute('data-ru', sortCell.textContent);
+      if (!summaryCell.hasAttribute('data-ru')) summaryCell.setAttribute('data-ru', summaryCell.textContent);
       if (i18n.getLocale() === 'ru') {
-        cells[4].textContent = cells[4].getAttribute('data-ru');
-        cells[5].textContent = cells[5].getAttribute('data-ru');
+        sortCell.textContent = sortCell.getAttribute('data-ru');
+        summaryCell.textContent = summaryCell.getAttribute('data-ru');
         return;
       }
       var slug = row.getAttribute('data-playlist-slug');
       function render(dto) {
         if (i18n.getLocale() !== 'en' || !schema || !dto) return;
-        cells[4].textContent = listSort(dto);
-        cells[5].textContent = listSummary(dto);
+        sortCell.textContent = listSort(dto);
+        summaryCell.textContent = listSummary(dto);
       }
       if (listDtos[slug] && schema) { render(listDtos[slug]); return; }
       if (!schema) {

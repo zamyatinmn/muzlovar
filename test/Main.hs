@@ -13,9 +13,12 @@ import ServerTests (serverTests)
 import StoreTests (storeTests)
 import Test.Tasty (defaultMain, testGroup)
 import UnitTests (unitTests)
+import System.IO (hSetEncoding, stdout, stderr, utf8)
 
 main :: IO ()
-main =
+main = do
+  hSetEncoding stdout utf8
+  hSetEncoding stderr utf8
   defaultMain $
     testGroup
       "nspeller"

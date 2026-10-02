@@ -53,6 +53,11 @@ module Nspeller.Muzlovar.Store
   , publishPlaylistIn
   , publishPlaylistFromIn
   , deletePlaylistFiles
+  , readArtwork
+  , putArtwork
+  , deleteArtwork
+  , artworkType
+  , artworkLimit
 
     -- * Состояние публикации (persisted state)
   , PublishedFile (..)
@@ -81,7 +86,7 @@ module Nspeller.Muzlovar.Store
   ) where
 
 import Control.Applicative (asum, (<|>))
-import Control.Exception (IOException, try)
+import Control.Exception (IOException, SomeException, try, mask, fromException, throwIO, bracket)
 import Control.Monad (filterM, forM, forM_, void, when)
 import Data.Aeson
   ( FromJSON (..)
@@ -96,10 +101,10 @@ import Data.Aeson
   , (.=)
   )
 import Data.Bifunctor (first)
-import Data.Bits (xor)
+import Data.Bits (xor, (.&.))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
-import Data.List (find, nub, sortOn)
+import Data.List (find, nub, nubBy, sortOn)
 import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Ord (Down (..))
 import Data.Text (Text)
@@ -132,6 +137,7 @@ import System.Directory
   ( canonicalizePath
   , createDirectory
   , createDirectoryIfMissing
+  , copyFile
   , doesDirectoryExist
   , doesFileExist
   , getModificationTime
@@ -149,8 +155,10 @@ import System.FilePath
   , takeDirectory
   , takeExtension
   , takeFileName
+  , equalFilePath
   )
 import System.IO.Error (isDoesNotExistError)
+import System.IO (openBinaryTempFile, hClose)
 
 ------------------------------------------------------------------------------
 -- Конфигурация
@@ -275,6 +283,7 @@ slugReadable slug =
     && not (".." `T.isInfixOf` slug)
     && not ("/" `T.isInfixOf` slug)
     && not ("\\" `T.isInfixOf` slug)
+    && not (":" `T.isInfixOf` slug)
     && not (T.isPrefixOf "." slug)
 
 -- | Транслитерация кириллицы для slug.
@@ -339,6 +348,7 @@ data PlaylistEntry = PlaylistEntry
   , peModified :: Maybe UTCTime
   , peError :: Maybe Text
     -- ^ Текст ошибки разбора для 'peStatus' = @"broken"@.
+  , peArtwork :: Bool
   }
   deriving (Eq, Show)
 
@@ -361,6 +371,7 @@ instance ToJSON PlaylistEntry where
       , "nspFile" .= peNspFile p
       , "modified" .= peModified p
       , "error" .= peError p
+      , "artwork" .= peArtwork p
       ]
 
 -- | Детальная карточка подборки.
@@ -665,6 +676,239 @@ mixPathOf cfg slug = scRulesDir cfg </> (T.unpack slug ++ ".mix")
 nspPathOf :: StoreConfig -> Text -> FilePath
 nspPathOf cfg slug = scPlaylistsDir cfg </> (T.unpack slug ++ ".nsp")
 
+-- Artwork is inferred from the existing .nsp basename; never persisted in
+-- the playlist or publication metadata. Bytes are copied without decoding.
+artworkLimit :: Int
+artworkLimit = 10 * 1024 * 1024
+
+artworkExtensions :: [String]
+artworkExtensions = [".jpg", ".jpeg", ".png", ".webp", ".gif"]
+
+-- Sniff the binary format, ignoring the supplied filename and Content-Type.
+artworkType :: BS.ByteString -> Maybe (String, Text)
+artworkType b
+  | BS.length b >= 33 && BS.take 8 b == BS.pack [137,80,78,71,13,10,26,10]
+      && BS.take 4 (BS.drop 12 b) == "IHDR"
+      && wordBE (BS.take 4 (BS.drop 8 b)) == 13
+      && wordBE (BS.take 4 (BS.drop 16 b)) > 0
+      && wordBE (BS.take 4 (BS.drop 20 b)) > 0
+      && pngChunks False (BS.drop 33 b) = Just (".png", "image/png")
+  | BS.length b >= 4 && BS.take 3 b == BS.pack [255,216,255]
+      && jpegSegments False (BS.drop 2 b) = Just (".jpg", "image/jpeg")
+  | BS.length b >= 14 && BS.take 6 b `elem` ["GIF87a", "GIF89a"]
+      && wordLE (BS.take 2 (BS.drop 6 b)) > 0
+      && wordLE (BS.take 2 (BS.drop 8 b)) > 0
+      && gifBlocks False (BS.drop (13 + gifTableSize (BS.index b 10)) b) = Just (".gif", "image/gif")
+  | BS.length b >= 20 && BS.take 4 b == "RIFF"
+      && BS.take 4 (BS.drop 8 b) == "WEBP"
+      && wordLE (BS.take 4 (BS.drop 4 b)) == fromIntegral (BS.length b - 8)
+      && webpChunks False (BS.drop 12 b)
+      = Just (".webp", "image/webp")
+  | otherwise = Nothing
+
+-- Walk container boundaries as well as checking magic bytes: a copied
+-- signature on an arbitrary/truncated file is not sufficient for upload.
+wordBE :: BS.ByteString -> Integer
+wordBE = BS.foldl' (\n x -> n * 256 + fromIntegral x) 0
+
+wordLE :: BS.ByteString -> Integer
+wordLE = wordBE . BS.reverse
+
+gifTableSize :: Word8 -> Int
+gifTableSize packed = if packed .&. 128 == 0 then 0 else 3 * 2 ^ (fromIntegral (packed .&. 7) + 1 :: Int)
+
+gifSubBlocks :: BS.ByteString -> Maybe BS.ByteString
+gifSubBlocks bytes
+  | BS.null bytes = Nothing
+  | size == 0 = Just (BS.drop 1 bytes)
+  | BS.length bytes < size + 1 = Nothing
+  | otherwise = gifSubBlocks (BS.drop (size + 1) bytes)
+  where size = fromIntegral (BS.head bytes)
+
+gifBlocks :: Bool -> BS.ByteString -> Bool
+gifBlocks seen bytes
+  | BS.null bytes = False
+  | BS.head bytes == 59 = seen
+  | BS.head bytes == 33 && BS.length bytes >= 3 =
+      maybe False (gifBlocks seen) (gifSubBlocks (BS.drop 2 bytes))
+  | BS.head bytes == 44 && BS.length bytes >= 11 =
+      let dataStart = 10 + gifTableSize (BS.index bytes 9)
+       in BS.length bytes > dataStart
+          && wordLE (BS.take 2 (BS.drop 5 bytes)) > 0
+          && wordLE (BS.take 2 (BS.drop 7 bytes)) > 0
+          && maybe False (gifBlocks True) (gifSubBlocks (BS.drop (dataStart + 1) bytes))
+  | otherwise = False
+
+pngChunks :: Bool -> BS.ByteString -> Bool
+pngChunks seen bytes
+  | BS.length bytes < 12 = False
+  | size > fromIntegral (BS.length bytes - 12) = False
+  | kind == "IEND" = seen && size == 0
+  | otherwise = pngChunks (seen || (kind == "IDAT" && size > 0)) rest
+  where
+    size = wordBE (BS.take 4 bytes)
+    kind = BS.take 4 (BS.drop 4 bytes)
+    rest = BS.drop (fromInteger size + 12) bytes
+
+jpegSegments :: Bool -> BS.ByteString -> Bool
+jpegSegments frame bytes
+  | BS.length bytes < 4 || BS.head bytes /= 255 = False
+  | marker == 255 = jpegSegments frame (BS.drop 1 bytes)
+  | size < 2 || size > fromIntegral (BS.length bytes - 2) = False
+  | marker == 218 = frame && size >= 6 && BS.pack [255,217] `BS.isInfixOf` rest
+  | otherwise = jpegSegments (frame || validFrame) rest
+  where
+    marker = BS.index bytes 1
+    size = wordBE (BS.take 2 (BS.drop 2 bytes))
+    rest = BS.drop (fromInteger size + 2) bytes
+    validFrame = marker `elem` [192,193,194,195,197,198,199,201,202,203,205,206,207]
+      && size >= 8 && wordBE (BS.take 2 (BS.drop 5 bytes)) > 0
+      && wordBE (BS.take 2 (BS.drop 7 bytes)) > 0
+
+webpChunks :: Bool -> BS.ByteString -> Bool
+webpChunks seen bytes
+  | BS.null bytes = seen
+  | BS.length bytes < 8 || padded > fromIntegral (BS.length bytes - 8) = False
+  | kind == "VP8 " && size < 10 = False
+  | kind == "VP8L" && size < 5 = False
+  | kind == "VP8X" && size /= 10 = False
+  | kind == "ANMF" && size < 16 = False
+  | otherwise = webpChunks (seen || kind `elem` ["VP8 ", "VP8L", "ANMF"]) rest
+  where
+    kind = BS.take 4 bytes
+    size = wordLE (BS.take 4 (BS.drop 4 bytes))
+    padded = size + size `mod` 2
+    rest = BS.drop (fromInteger padded + 8) bytes
+
+artworkPaths :: FilePath -> Text -> IO [FilePath]
+artworkPaths dir slug = do
+  names <- listDirectory dir
+  pure [dir </> n | n <- sortOn id names, takeBaseName n == T.unpack slug,
+                    map lowerAscii (takeExtension n) `elem` artworkExtensions]
+  where
+    lowerAscii c | c >= 'A' && c <= 'Z' = toEnum (fromEnum c + 32)
+                 | otherwise = c
+
+-- Unlike checkTarget, also reject dangling symlinks before creating a file.
+checkArtworkPath :: FilePath -> IO (Either StoreError ())
+checkArtworkPath p = do
+  link <- try (pathIsSymbolicLink p) :: IO (Either IOException Bool)
+  case link of
+    Right True -> pure (Left (StoreUnsafePath p))
+    Left e | not (isDoesNotExistError e) -> pure (Left (StoreIo (T.pack (show e))))
+    _ -> checkTarget p
+
+artworkFor :: StoreConfig -> Text -> IO (Either StoreError [FilePath])
+artworkFor cfg slug
+  | not (slugReadable slug) = pure (Left (StoreUnsafeSlug slug))
+  | otherwise = do
+      c <- checkArtworkPath (nspPathOf cfg slug)
+      exists <- doesFileExist (nspPathOf cfg slug)
+      case c of
+        Left e -> pure (Left e)
+        Right () | not exists -> pure (Left (StoreNotFound slug))
+        Right () -> do
+          ps <- artworkPaths (scPlaylistsDir cfg) slug
+          cs <- mapM checkArtworkPath ps
+          pure (sequence_ cs >> Right ps)
+
+readArtwork :: StoreConfig -> Text -> IO (Either StoreError (Text, BS.ByteString))
+readArtwork cfg slug = do
+  r <- artworkFor cfg slug
+  case r of
+    Left e -> pure (Left e)
+    Right ps -> findImage ps
+  where
+    findImage [] = pure (Left (StoreNotFound slug))
+    findImage (p:ps) = do
+      r <- try (BS.readFile p) :: IO (Either IOException BS.ByteString)
+      case r of
+        Left e -> pure (Left (StoreIo (T.pack (show e))))
+        Right b -> case artworkType b of
+          Just (_, mime) -> pure (Right (mime, b))
+          Nothing -> findImage ps
+
+-- Unique backups are kept until the entire action succeeds. On a reported
+-- failure, restore all touched paths (including publication state). Failed
+-- rollback retains the backup and returns an explicit partial-operation error.
+withFileRollback :: [FilePath] -> IO (Either StoreError a) -> IO (Either StoreError a)
+withFileRollback paths action = mask $ \restore -> do
+  checks <- mapM checkArtworkPath (nubBy equalFilePath paths)
+  case sequence_ checks of
+    Left e -> pure (Left e)
+    Right () -> do
+      saved <- save [] (nubBy equalFilePath paths)
+      case saved of
+        Left e -> pure (Left e)
+        Right backups -> do
+          result <- try (restore action)
+          let outcome = case result of
+                Left e -> Left (StoreIo (T.pack (show (e :: SomeException))))
+                Right r -> r
+          case outcome of
+            Right value -> mapM_ (maybe (pure ()) removeQuiet . snd) backups >> pure (Right value)
+            Left e -> do
+              undone <- forM backups $ \(p, mb) -> do
+                r <- try (case mb of
+                  Nothing -> do
+                    ex <- doesFileExist p
+                    when ex (removeFile p)
+                  Just backup -> copyFile backup p) :: IO (Either IOException ())
+                case r of
+                  Right () -> maybe (pure ()) removeQuiet mb >> pure True
+                  Left _ -> pure False
+              if not (and undone)
+                then pure (Left (StorePartial "Artwork rollback failed; recovery backups retained beside the files."))
+                else case result of
+                  Left exception | Nothing <- (fromException exception :: Maybe IOException) -> throwIO exception
+                  _ -> pure (Left e)
+  where
+    save acc [] = pure (Right acc)
+    save acc (p:ps) = do
+      r <- try (do
+        ex <- doesFileExist p
+        if not ex then pure Nothing else do
+          (backup, handle) <- openBinaryTempFile (takeDirectory p) ".muzlovar-artwork-backup-"
+          hClose handle
+          copied <- try (copyFile p backup) :: IO (Either IOException ())
+          case copied of
+            Left e -> removeQuiet backup >> ioError e
+            Right () -> pure (Just backup)) :: IO (Either IOException (Maybe FilePath))
+      case r of
+        Left e -> do
+          mapM_ (maybe (pure ()) removeQuiet . snd) acc
+          pure (Left (StoreIo (T.pack (show e))))
+        Right mb -> save ((p, mb):acc) ps
+
+putArtwork :: StoreConfig -> Text -> BS.ByteString -> IO (Either StoreError ())
+putArtwork cfg slug bytes
+  | BS.length bytes > artworkLimit = pure (Left (StoreInvalid slug [ApiError "artwork_too_large" "Artwork exceeds 10 MB." Nothing Nothing Nothing]))
+  | Nothing <- artworkType bytes = pure (Left (StoreInvalid slug [ApiError "unsupported_artwork" "Choose JPEG, PNG, WebP or GIF." Nothing Nothing Nothing]))
+  | Just (ext, _) <- artworkType bytes = do
+      r <- artworkFor cfg slug
+      case r of
+        Left e -> pure (Left e)
+        Right old -> do
+          let target = scPlaylistsDir cfg </> (T.unpack slug ++ ext)
+          withFileRollback (target:old) $ do
+            -- Unique staging file prevents a pre-existing .tmp symlink from
+            -- redirecting an upload. Rename publishes the original bytes.
+            bracket
+              (openBinaryTempFile (scPlaylistsDir cfg) ".muzlovar-artwork-upload-")
+              (\(stage, handle) -> do
+                void (try (hClose handle) :: IO (Either IOException ()))
+                removeQuiet stage)
+              (\(stage, handle) -> BS.hPut handle bytes >> hClose handle >> renameFile stage target)
+            mapM_ removeFile (filter (not . equalFilePath target) old)
+            pure (Right ())
+
+deleteArtwork :: StoreConfig -> Text -> IO (Either StoreError ())
+deleteArtwork cfg slug = do
+  r <- artworkFor cfg slug
+  case r of
+    Left e -> pure (Left e)
+    Right ps -> withFileRollback ps (mapM_ removeFile ps >> pure (Right ()))
+
 -- | Разбор @.nsp@ в DTO.
 decodeNspText :: Text -> Either Text PlaylistDto
 decodeNspText t = case eitherDecode (LBS.fromStrict (encodeUtf8 t)) :: Either String Value of
@@ -686,6 +930,7 @@ loadEntry cfg slug = do
     then pure Nothing
     else do
       modT <- newestMTime [p | (True, p) <- [(hasMix, mixP), (hasNsp, nspP)]]
+      art <- if hasNsp && slugReadable slug then readArtwork cfg slug else pure (Left (StoreNotFound slug))
       let base =
             PlaylistEntry
               { peSlug = slug
@@ -704,6 +949,7 @@ loadEntry cfg slug = do
               , peNspFile = if hasNsp then Just (T.unpack slug ++ ".nsp") else Nothing
               , peModified = modT
               , peError = Nothing
+              , peArtwork = either (const False) (const True) art
               }
       if not (slugReadable slug)
         then
@@ -1143,6 +1389,36 @@ publishPlaylistWith removeFn cfg mPrev slug overwrite dto = do
 publishPlaylistWithIn ::
   DslDialect -> (FilePath -> IO ()) -> StoreConfig -> Maybe Text -> Text -> Bool -> PlaylistDto -> IO (Either StoreError PlaylistDetail)
 publishPlaylistWithIn d removeFn cfg mPrev slug overwrite dto = do
+  -- Retain the original publication semantics for playlists without artwork.
+  -- Artwork renames wrap the complete publication in rollback, so a cleanup
+  -- or state-write failure cannot strand the image under the wrong basename.
+  r <- case mPrev of
+    Just prev | prev /= slug && slugReadable prev && slugSafe slug -> do
+      exists <- doesFileExist (nspPathOf cfg prev)
+      if exists then artworkFor cfg prev else pure (Right [])
+    _ -> pure (Right [])
+  case r of
+    Left e -> pure (Left e)
+    Right [] -> publishPlaylistCore d removeFn cfg mPrev slug overwrite dto
+    Right old -> do
+      targets <- artworkPaths (scPlaylistsDir cfg) slug
+      if not (null targets)
+        then pure (Left (StoreConflict slug))
+        else do
+          let moved = [(p, scPlaylistsDir cfg </> (T.unpack slug ++ takeExtension p)) | p <- old]
+              prev = fromMaybe slug mPrev
+              touched = old ++ map snd moved ++ [mixPathOf cfg prev, nspPathOf cfg prev,
+                mixPathOf cfg slug, nspPathOf cfg slug, stateFilePath cfg]
+          withFileRollback touched $ do
+            published <- publishPlaylistCore d removeFn cfg mPrev slug overwrite dto
+            case published of
+              Left e -> pure (Left e)
+              Right _ -> do
+                forM_ moved (uncurry renameFile)
+                readPlaylist cfg slug
+
+publishPlaylistCore :: DslDialect -> (FilePath -> IO ()) -> StoreConfig -> Maybe Text -> Text -> Bool -> PlaylistDto -> IO (Either StoreError PlaylistDetail)
+publishPlaylistCore d removeFn cfg mPrev slug overwrite dto = do
   ed <- ensureStoreDirs cfg
   case ed of
     Left e -> pure (Left e)
@@ -1237,6 +1513,12 @@ deletePlaylistFiles cfg slug = do
           if not hasMix && not hasNsp
             then pure (Left (StoreNotFound slug))
             else do
+              artsR <- if hasNsp then artworkFor cfg slug else pure (Right [])
+              case artsR of
+                Left e -> pure (Left e)
+                Right arts -> deleteWithArtwork mixT nspT hasMix hasNsp arts
+  where
+    deleteWithArtwork mixT nspT hasMix hasNsp arts = do
               now <- getCurrentTime
               let ts = formatTime defaultTimeLocale "%Y%m%dT%H%M%S" now
                   dirName0 = ts <> "-" <> T.unpack slug
@@ -1245,6 +1527,7 @@ deletePlaylistFiles cfg slug = do
                   moves =
                     [(mixT, dir </> takeFileName mixT, hasMix)]
                       ++ [(nspT, dir </> takeFileName nspT, hasNsp)]
+                      ++ [(p, dir </> takeFileName p, True) | p <- arts]
               createR <- try (createDirectory dir) :: IO (Either IOException ())
               case createR of
                 Left _ ->
@@ -1414,11 +1697,13 @@ restoreTrash cfg tid = do
               if not (slugReadable slug)
                 then pure (Left (StoreUnsafeSlug slug))
                 else do
+                  arts <- artworkPaths dir slug
                   let mixT = mixPathOf cfg slug
                       nspT = nspPathOf cfg slug
                       moves =
                         [(dir </> takeFileName mixT, mixT, T.unpack slug ++ ".mix")]
                           ++ [(dir </> takeFileName nspT, nspT, T.unpack slug ++ ".nsp")]
+                          ++ [(p, scPlaylistsDir cfg </> takeFileName p, takeFileName p) | p <- arts]
                   targets <- forM moves $ \(_, dst, name) -> do
                     ex <- doesFileExist dst
                     pure (ex, name)

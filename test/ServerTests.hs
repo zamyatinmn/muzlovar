@@ -18,7 +18,7 @@ import Nspeller.Muzlovar.Server
 import Nspeller.Muzlovar.Store
 import Nspeller.Muzlovar.Types
 import StoreTests (withTempStore)
-import System.Directory (doesFileExist, listDirectory)
+import System.Directory (doesFileExist, listDirectory, createDirectory, removeFile)
 import System.FilePath ((</>))
 import Test.Tasty (TestName, TestTree, testGroup)
 import Test.Tasty.HUnit
@@ -597,4 +597,189 @@ serverTests =
     , externalTests
     , apiErrorTests
     , unitTests
+    , artworkTests
     ]
+
+artworkTests :: TestTree
+artworkTests = testGroup "Artwork"
+  ([ testCase ("upload " ++ ext ++ ": original bytes and MIME") $
+       withOpenServer ("art-" ++ ext) $ \app cfg -> do
+         (_, endpoint) <- createArtworkPlaylist app
+         bytes <- BS.readFile ("test/artwork/sample." ++ ext)
+         -- Deliberately claim JSON: binary detection determines the format.
+         uploaded <- run1 app (sreq methodPut endpoint "" (LBS.fromStrict bytes) [])
+         statusOf uploaded @?= 200
+         downloaded <- run1 app (sreq methodGet endpoint "" "" [])
+         statusOf downloaded @?= 200
+         lookup hContentType (simpleHeaders downloaded) @?= Just mime
+         simpleBody downloaded @?= LBS.fromStrict bytes
+         BS.readFile (scPlaylistsDir cfg </> T.unpack (slugFromName (pdName validDto)) ++ "." ++ ext) >>= (@?= bytes)
+     | (ext, mime) <- [("png", "image/png"), ("jpg", "image/jpeg"), ("webp", "image/webp"), ("gif", "image/gif")]]
+   ++ [ testCase "reject unsupported file and MIME spoofing" $
+        withOpenServer "art-invalid" $ \app _ -> do
+          (_, endpoint) <- createArtworkPlaylist app
+          invalid <- run1 app (sreq methodPut endpoint "" "<svg>not a supported image</svg>" [(hContentType, "image/png")])
+          statusOf invalid @?= 415
+          assertHasCode "unsupported_artwork" invalid
+      , testCase "truncated supported images are rejected" $
+        withOpenServer "art-truncated" $ \app _ -> do
+          (_, endpoint) <- createArtworkPlaylist app
+          mapM_ (\ext -> do
+            bytes <- BS.readFile ("test/artwork/sample." ++ ext)
+            r <- run1 app (sreq methodPut endpoint "" (LBS.fromStrict (BS.take (BS.length bytes `div` 2) bytes)) [])
+            statusOf r @?= 415) ["png", "jpg", "webp", "gif"]
+      , testCase "reject >10 MB, existing artwork retained" $
+        withOpenServer "art-large" $ \app _ -> do
+          (_, endpoint) <- createArtworkPlaylist app
+          png <- BS.readFile "test/artwork/sample.png"
+          run1 app (sreq methodPut endpoint "" (LBS.fromStrict png) []) >>= (\r -> statusOf r @?= 200)
+          large <- run1 app (sreq methodPut endpoint "" (LBS.fromStrict (png <> BS.replicate artworkLimit 0)) [])
+          statusOf large @?= 413
+          assertHasCode "artwork_too_large" large
+          readBack <- run1 app (sreq methodGet endpoint "" "" [])
+          simpleBody readBack @?= LBS.fromStrict png
+      , testCase "manual .jpeg and uppercase sidecar detection" $
+        withOpenServer "art-manual" $ \app cfg -> do
+          (slug, endpoint) <- createArtworkPlaylist app
+          jpeg <- BS.readFile "test/artwork/sample.jpg"
+          BS.writeFile (scPlaylistsDir cfg </> T.unpack slug ++ ".JPEG") jpeg
+          getArt <- run1 app (sreq methodGet endpoint "" "" [])
+          statusOf getArt @?= 200
+          lookup hContentType (simpleHeaders getArt) @?= Just "image/jpeg"
+          simpleBody getArt @?= LBS.fromStrict jpeg
+          detail <- run1 app (sreq methodGet ("/api/playlists/" <> TE.encodeUtf8 slug) "" "" [])
+          case bodyField "entry" detail of
+            Just (Object e) -> KM.lookup "artwork" e @?= Just (Bool True)
+            _ -> assertFailure "Missing entry"
+          page <- run1 app (sreq methodGet "/" "" "" [])
+          assertBool "list thumbnail missing" (bodyContains "list-artwork" page)
+      , testCase "replacement jpg -> png removes every old extension" $
+        withOpenServer "art-replace" $ \app cfg -> do
+          (slug, endpoint) <- createArtworkPlaylist app
+          jpeg <- BS.readFile "test/artwork/sample.jpg"
+          png <- BS.readFile "test/artwork/sample.png"
+          let old ext = scPlaylistsDir cfg </> T.unpack slug ++ ext
+          mapM_ (\ext -> BS.writeFile (old ext) jpeg) [".jpg", ".jpeg", ".GIF"]
+          r <- run1 app (sreq methodPut endpoint "" (LBS.fromStrict png) [])
+          statusOf r @?= 200
+          mapM_ (\ext -> doesFileExist (old ext) >>= (@?= False)) [".jpg", ".jpeg", ".GIF"]
+          BS.readFile (old ".png") >>= (@?= png)
+      , testCase "uppercase .JPG replacement preserves uploaded JPEG on Windows" $
+        withOpenServer "art-uppercase" $ \app cfg -> do
+          (slug, endpoint) <- createArtworkPlaylist app
+          jpeg <- BS.readFile "test/artwork/sample.jpg"
+          BS.writeFile (scPlaylistsDir cfg </> T.unpack slug ++ ".JPG") jpeg
+          uploaded <- run1 app (sreq methodPut endpoint "" (LBS.fromStrict jpeg) [])
+          statusOf uploaded @?= 200
+          downloaded <- run1 app (sreq methodGet endpoint "" "" [])
+          statusOf downloaded @?= 200
+          simpleBody downloaded @?= LBS.fromStrict jpeg
+          names <- listDirectory (scPlaylistsDir cfg)
+          length [n | n <- names, ".jpg" `T.isSuffixOf` T.toLower (T.pack n)] @?= 1
+      , testCase "rename preserves artwork bytes and extension" $
+        withOpenServer "art-rename" $ \app cfg -> do
+          (slug, _) <- createArtworkPlaylist app
+          gif <- BS.readFile "test/artwork/sample.gif"
+          let old = scPlaylistsDir cfg </> T.unpack slug ++ ".gif"
+              new = scPlaylistsDir cfg </> T.unpack renameSlug ++ ".gif"
+          BS.writeFile old gif
+          r <- run1 app (sreq methodPut ("/api/playlists/" <> TE.encodeUtf8 slug) "" (encode renameDto) [])
+          statusOf r @?= 200
+          doesFileExist old >>= (@?= False)
+          BS.readFile new >>= (@?= gif)
+      , testCase "delete and restore include sidecar, unrelated images retained" $
+        withOpenServer "art-delete" $ \app cfg -> do
+          (slug, endpoint) <- createArtworkPlaylist app
+          png <- BS.readFile "test/artwork/sample.png"
+          BS.writeFile (scPlaylistsDir cfg </> "unrelated.png") png
+          uploaded <- run1 app (sreq methodPut endpoint "" (LBS.fromStrict png) [])
+          statusOf uploaded @?= 200
+          deleted <- run1 app (sreq methodDelete ("/api/playlists/" <> TE.encodeUtf8 slug) "" "" [])
+          statusOf deleted @?= 200
+          doesFileExist (scPlaylistsDir cfg </> T.unpack slug ++ ".png") >>= (@?= False)
+          BS.readFile (scPlaylistsDir cfg </> "unrelated.png") >>= (@?= png)
+          restored <- run1 app (sreq methodPost ("/api/trash/" <> TE.encodeUtf8 (trashIdOf deleted) <> "/restore") "" "" [])
+          statusOf restored @?= 200
+          BS.readFile (scPlaylistsDir cfg </> T.unpack slug ++ ".png") >>= (@?= png)
+      , testCase "playlist without artwork and idempotent artwork deletion" $
+        withOpenServer "art-none" $ \app _ -> do
+          (_, endpoint) <- createArtworkPlaylist app
+          missing <- run1 app (sreq methodGet endpoint "" "" [])
+          statusOf missing @?= 404
+          removed <- run1 app (sreq methodDelete endpoint "" "" [])
+          statusOf removed @?= 200
+      , testCase "Unicode playlist basename discovered without metadata" $
+        withOpenServer "art-unicode" $ \app cfg -> do
+          png <- BS.readFile "test/artwork/sample.png"
+          let slug = "Любимые хиты"
+              endpoint = "/api/playlists/" <> TE.encodeUtf8 slug <> "/artwork"
+          BS.writeFile (scPlaylistsDir cfg </> T.unpack slug ++ ".nsp") (compiledNsp validDto)
+          BS.writeFile (scPlaylistsDir cfg </> T.unpack slug ++ ".png") png
+          r <- run1 app (sreq methodGet endpoint "" "" [])
+          statusOf r @?= 200
+          simpleBody r @?= LBS.fromStrict png
+      , testCase "missing playlist cannot create artwork" $
+        withOpenServer "art-missing" $ \app cfg -> do
+          png <- BS.readFile "test/artwork/sample.png"
+          r <- run1 app (sreq methodPut "/api/playlists/missing/artwork" "" (LBS.fromStrict png) [])
+          statusOf r @?= 404
+          listDirectory (scPlaylistsDir cfg) >>= (@?= [])
+      , testCase "path traversal and Windows alternate streams rejected" $
+        withOpenServer "art-path" $ \app cfg -> do
+          _ <- createArtworkPlaylist app
+          png <- BS.readFile "test/artwork/sample.png"
+          mapM_ (\slug -> do
+            readArtwork cfg slug >>= (\r -> assertBool "read traversal accepted" (isLeft r))
+            putArtwork cfg slug png >>= (\r -> assertBool "upload traversal accepted" (isLeft r))
+            deleteArtwork cfg slug >>= (\r -> assertBool "delete traversal accepted" (isLeft r)))
+            ["../outside", "..\\outside", "C:\\outside", "playlist:stream", "/outside"]
+          mapM_ (\p -> do
+            r <- run1 app (sreq methodPut p "" (LBS.fromStrict png) [])
+            assertBool "HTTP traversal accepted" (statusOf r >= 400))
+            ["/api/playlists/../artwork", "/api/playlists/..%2Foutside/artwork", "/api/playlists/C:%5Coutside/artwork"]
+      , testCase "rename cleanup failure rolls back playlist, state and artwork" $
+        withOpenServer "art-rollback" $ \app cfg -> do
+          (slug, _) <- createArtworkPlaylist app
+          png <- BS.readFile "test/artwork/sample.png"
+          let old = scPlaylistsDir cfg </> T.unpack slug ++ ".png"
+          BS.writeFile old png
+          before <- BS.readFile (stateFilePath cfg)
+          r <- publishPlaylistWith (\p -> if p == scPlaylistsDir cfg </> T.unpack slug ++ ".nsp"
+            then removeFile p else ioError (userError "injected cleanup failure")) cfg (Just slug) renameSlug False renameDto
+          assertBool "rename unexpectedly succeeded" (isLeft r)
+          BS.readFile old >>= (@?= png)
+          BS.readFile (stateFilePath cfg) >>= (@?= before)
+          doesFileExist (scPlaylistsDir cfg </> T.unpack slug ++ ".nsp") >>= (@?= True)
+          doesFileExist (scPlaylistsDir cfg </> T.unpack renameSlug ++ ".nsp") >>= (@?= False)
+          doesFileExist (scPlaylistsDir cfg </> T.unpack renameSlug ++ ".png") >>= (@?= False)
+      , testCase "rename artwork target conflict leaves originals intact" $
+        withOpenServer "art-conflict" $ \app cfg -> do
+          (slug, _) <- createArtworkPlaylist app
+          png <- BS.readFile "test/artwork/sample.png"
+          BS.writeFile (scPlaylistsDir cfg </> T.unpack slug ++ ".png") png
+          BS.writeFile (scPlaylistsDir cfg </> T.unpack renameSlug ++ ".jpg") "other image"
+          r <- run1 app (sreq methodPut ("/api/playlists/" <> TE.encodeUtf8 slug) "" (encode renameDto) [])
+          statusOf r @?= 409
+          BS.readFile (scPlaylistsDir cfg </> T.unpack slug ++ ".png") >>= (@?= png)
+          BS.readFile (scPlaylistsDir cfg </> T.unpack renameSlug ++ ".jpg") >>= (@?= "other image")
+      , testCase "unsafe artwork directory blocks upload without losing old image" $
+        withOpenServer "art-blocked" $ \app cfg -> do
+          (slug, endpoint) <- createArtworkPlaylist app
+          jpeg <- BS.readFile "test/artwork/sample.jpg"
+          png <- BS.readFile "test/artwork/sample.png"
+          BS.writeFile (scPlaylistsDir cfg </> T.unpack slug ++ ".jpg") jpeg
+          createDirectory (scPlaylistsDir cfg </> T.unpack slug ++ ".png")
+          r <- run1 app (sreq methodPut endpoint "" (LBS.fromStrict png) [])
+          statusOf r @?= 409
+          BS.readFile (scPlaylistsDir cfg </> T.unpack slug ++ ".jpg") >>= (@?= jpeg)
+      ])
+  where
+    isLeft (Left _) = True
+    isLeft _ = False
+
+createArtworkPlaylist :: Application -> IO (Text, BS.ByteString)
+createArtworkPlaylist app = do
+  created <- run1 app (sreq methodPost "/api/playlists" "" (encode validDto) [])
+  statusOf created @?= 201
+  let slug = slugFromName (pdName validDto)
+  pure (slug, "/api/playlists/" <> TE.encodeUtf8 slug <> "/artwork")

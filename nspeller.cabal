@@ -18,6 +18,9 @@ extra-doc-files:
     SECURITY.md
     docs/nspeller-reference.ru.md
     docs/nspeller-reference.en.md
+    docs/muzlovar-artwork.md
+extra-source-files:
+    test/artwork/*
 
 source-repository head
   type:             git

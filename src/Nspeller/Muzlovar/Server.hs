@@ -29,6 +29,7 @@ module Nspeller.Muzlovar.Server
   ) where
 
 import Control.Monad.IO.Class (liftIO)
+import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Data.Aeson (Value, eitherDecode, object, (.=))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64 as Base64
@@ -51,10 +52,12 @@ import Network.HTTP.Types.Status
   , status401
   , status404
   , status409
+  , status413
+  , status415
   , status422
   , status500
   )
-import Network.Wai (Application, Middleware, pathInfo, requestHeaders, responseLBS)
+import Network.Wai (Application, Middleware, pathInfo, requestHeaders, responseLBS, getRequestBodyChunk, Request)
 import qualified Nspeller.Muzlovar.Assets as Assets
 import Nspeller.Dialect (DslDialect (..), parseDialect)
 import Nspeller.Muzlovar.Html (editorPage, errorPage, indexPage, renderHtml, trashPage)
@@ -64,6 +67,10 @@ import Nspeller.Muzlovar.Store
   , StoreConfig (..)
   , StoreError (..)
   , deletePlaylistFiles
+  , readArtwork
+  , putArtwork
+  , deleteArtwork
+  , artworkLimit
   , listPlaylists
   , listTrash
   , publishPlaylistIn
@@ -81,7 +88,7 @@ import Nspeller.Muzlovar.Subsonic
   , subsonicGetPlaylists
   )
 import Nspeller.Muzlovar.Types
-  ( ApiError
+  ( ApiError (aeCode)
   , Compiled (cmpMix, cmpNsp)
   , PlaylistDto
   , apiError
@@ -126,7 +133,8 @@ data ServerConfig = ServerConfig
 -- (middleware подключается, только если 'scAuth' задан).
 muzlovarApp :: ServerConfig -> IO Application
 muzlovarApp cfg = do
-  app <- scottyApp (routes cfg)
+  lock <- newMVar ()
+  app <- scottyApp (routes cfg lock)
   pure $ case scAuth cfg of
     Nothing -> app
     Just (user, pass) -> basicAuthMiddleware user pass app
@@ -203,7 +211,10 @@ storeErrorToApi = \case
     ([apiError "unsafe_path" (storeErrorMessage (StoreUnsafePath p))], status422)
   StoreConflict s ->
     ([apiError "conflict" (storeErrorMessage (StoreConflict s))], status409)
-  StoreInvalid _ errs -> (errs, status422)
+  StoreInvalid _ errs
+    | any ((== "artwork_too_large") . aeCode) errs -> (errs, status413)
+    | any ((== "unsupported_artwork") . aeCode) errs -> (errs, status415)
+    | otherwise -> (errs, status422)
   StoreIo m -> ([apiError "io_error" m], status500)
   StorePartial m -> ([apiError "partial_delete" m], status500)
   StoreCleanupBlocked p why ->
@@ -236,8 +247,8 @@ respondStoreError e = respondErrors (storeErrorStatus e) (fst (storeErrorToApi e
 -- Маршруты
 ------------------------------------------------------------------------------
 
-routes :: ServerConfig -> ScottyM ()
-routes cfg = do
+routes :: ServerConfig -> MVar () -> ScottyM ()
+routes cfg lock = do
   --------------------------------------------------------------- health
   get "/health" $ do
     status status200
@@ -248,7 +259,7 @@ routes cfg = do
     json schemaJson
 
   get "/api/playlists" $ do
-    r <- liftIO (listPlaylists (scStoreCfg cfg))
+    r <- storeIO (listPlaylists (scStoreCfg cfg))
     either respondStoreError (\xs -> json (object ["playlists" .= xs])) r
 
   post "/api/validate" $ do
@@ -282,7 +293,7 @@ routes cfg = do
       Right dto -> do
         overwrite <- overwriteRequested
         let slug = slugFromName (pdName dto)
-        r <- liftIO (publishPlaylistIn dialect (scStoreCfg cfg) slug overwrite dto)
+        r <- storeIO (publishPlaylistIn dialect (scStoreCfg cfg) slug overwrite dto)
         case r of
           Left e -> respondStoreError e
           Right d -> do
@@ -291,13 +302,37 @@ routes cfg = do
 
   get "/api/playlists/:slug" $ do
     slug <- pathParam "slug"
-    r <- liftIO (readPlaylist (scStoreCfg cfg) slug)
+    r <- storeIO (readPlaylist (scStoreCfg cfg) slug)
     either respondStoreError json r
+
+  get "/api/playlists/:slug/artwork" $ do
+    slug <- pathParam "slug"
+    r <- storeIO (readArtwork (scStoreCfg cfg) slug)
+    case r of
+      Left e -> respondStoreError e
+      Right (mime, bytes) -> do
+        setHeader "X-Content-Type-Options" "nosniff"
+        serveBytes (LT.fromStrict mime) bytes
+
+  put "/api/playlists/:slug/artwork" $ do
+    slug <- pathParam "slug"
+    req <- request
+    bytes <- liftIO (boundedArtworkBody req)
+    case bytes of
+      Nothing -> respondErrors status413 [apiError "artwork_too_large" "Artwork exceeds 10 MB."]
+      Just b -> do
+        r <- storeIO (putArtwork (scStoreCfg cfg) slug b)
+        either respondStoreError (const (json (object ["artwork" .= True]))) r
+
+  delete "/api/playlists/:slug/artwork" $ do
+    slug <- pathParam "slug"
+    r <- storeIO (deleteArtwork (scStoreCfg cfg) slug)
+    either respondStoreError (const (json (object ["artwork" .= False]))) r
 
   put "/api/playlists/:slug" $ do
     dialect <- requestedDialect
     slug <- pathParam "slug"
-    detail <- liftIO (readPlaylist (scStoreCfg cfg) slug)
+    detail <- storeIO (readPlaylist (scStoreCfg cfg) slug)
     case detail of
       Left e -> respondStoreError e
       Right d
@@ -320,17 +355,17 @@ routes cfg = do
                 -- файлов по persisted state.
                 let target = slugFromName (pdName dto)
                 r <-
-                  liftIO
+                  storeIO
                     (publishPlaylistFromIn dialect (scStoreCfg cfg) (Just slug) target overwrite dto)
                 either respondStoreError json r
 
   delete "/api/playlists/:slug" $ do
     slug <- pathParam "slug"
-    detail <- liftIO (readPlaylist (scStoreCfg cfg) slug)
+    detail <- storeIO (readPlaylist (scStoreCfg cfg) slug)
     case detail of
       Left e -> respondStoreError e
       Right d -> do
-        r <- liftIO (deletePlaylistFiles (scStoreCfg cfg) slug)
+        r <- storeIO (deletePlaylistFiles (scStoreCfg cfg) slug)
         case r of
           Left e -> respondStoreError e
           Right tid -> do
@@ -339,17 +374,17 @@ routes cfg = do
 
   ----------------------------------------------------------------- trash
   get "/api/trash" $ do
-    r <- liftIO (listTrash (scStoreCfg cfg))
+    r <- storeIO (listTrash (scStoreCfg cfg))
     either respondStoreError (\xs -> json (object ["trash" .= xs])) r
 
   post "/api/trash/:id/restore" $ do
     tid <- pathParam "id"
-    r <- liftIO (restoreTrash (scStoreCfg cfg) tid)
+    r <- storeIO (restoreTrash (scStoreCfg cfg) tid)
     either respondStoreError (const (json (object ["restored" .= True]))) r
 
   delete "/api/trash/:id" $ do
     tid <- pathParam "id"
-    r <- liftIO (purgeTrash (scStoreCfg cfg) tid)
+    r <- storeIO (purgeTrash (scStoreCfg cfg) tid)
     either respondStoreError (const (json (object ["purged" .= True]))) r
 
   ---------------------------------------------------------------- static
@@ -371,7 +406,7 @@ routes cfg = do
 
   ------------------------------------------------------------------ html
   get "/" $ do
-    r <- liftIO (listPlaylists (scStoreCfg cfg))
+    r <- storeIO (listPlaylists (scStoreCfg cfg))
     case r of
       Left e -> htmlPage (errorPage (storeErrorMessage e))
       Right xs -> htmlPage (indexPage xs)
@@ -381,7 +416,7 @@ routes cfg = do
 
   get "/edit/:slug" $ do
     slug <- pathParam "slug"
-    r <- liftIO (readPlaylist (scStoreCfg cfg) slug)
+    r <- storeIO (readPlaylist (scStoreCfg cfg) slug)
     case r of
       Left e -> htmlPage (errorPage (storeErrorMessage e))
       Right d ->
@@ -393,7 +428,7 @@ routes cfg = do
           )
 
   get "/trash" $ do
-    r <- liftIO (listTrash (scStoreCfg cfg))
+    r <- storeIO (listTrash (scStoreCfg cfg))
     case r of
       Left e -> htmlPage (errorPage (storeErrorMessage e))
       Right xs -> htmlPage (trashPage xs)
@@ -403,6 +438,11 @@ routes cfg = do
     if take 1 p == ["api"]
       then respondErrors status404 [apiError "not_found" "Маршрут не найден."]
       else htmlPage (errorPage "Страница не найдена.")
+  where
+    -- Serialize only filesystem operations. Receiving an upload, validating
+    -- DTOs and calling Subsonic do not hold the store lock.
+    storeIO :: IO a -> ActionM a
+    storeIO action = liftIO (withMVar lock (\_ -> action))
 
 ------------------------------------------------------------------------------
 -- Вспомогательное
@@ -432,6 +472,18 @@ serveBytes ct bs = do
   setHeader "Content-Type" ct
   setHeader "Cache-Control" "no-cache"
   raw (LBS.fromStrict bs)
+
+-- Read at most the limit plus one WAI chunk; do not buffer an unbounded
+-- request via Scotty.body. This also handles chunked uploads without a length.
+boundedArtworkBody :: Request -> IO (Maybe BS.ByteString)
+boundedArtworkBody req = go 0 []
+  where
+    go size chunks = do
+      chunk <- getRequestBodyChunk req
+      let next = size + BS.length chunk
+      if next > artworkLimit then pure Nothing
+        else if BS.null chunk then pure (Just (BS.concat (reverse chunks)))
+        else go next (chunk:chunks)
 
 -- | Разбор тела запроса как 'PlaylistDto' со структурированной ошибкой.
 parseDtoBody :: ActionM (Either [ApiError] PlaylistDto)

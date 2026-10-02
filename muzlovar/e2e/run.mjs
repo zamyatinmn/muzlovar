@@ -1548,7 +1548,7 @@ const localeScenarios = [
       assert(await page.$eval('.toolbar h2', (e) => e.textContent) === 'Smart playlists', 'English list heading');
       await page.waitForFunction(() => {
         const row = document.querySelector('tr[data-playlist-slug="e2e-dnd"]');
-        return row && row.querySelectorAll('td')[5].textContent.includes('ALL');
+        return row && row.querySelector('.summary').textContent.includes('ALL');
       });
       const row = await page.$eval('tr[data-playlist-slug="e2e-dnd"]', (e) => e.textContent);
       assert(row.includes('ALL'), 'English condition tree');
@@ -1582,14 +1582,14 @@ const localeScenarios = [
       assert(Buffer.from(await page.$eval('#e-preview', (e) => e.textContent)).equals(beforeMix), '.mix changed with locale');
       assert(Buffer.from(await page.$eval('#e-preview-nsp', (e) => e.textContent)).equals(beforeNsp), '.nsp changed with locale');
       await page.goto(new URL('/', page.url()).href, {waitUntil:'networkidle'});
-      const ruList = await page.$eval('tr[data-playlist-slug="e2e-relative"] td:nth-child(6)', (e) => e.textContent);
+      const ruList = await page.$eval('tr[data-playlist-slug="e2e-relative"] .summary', (e) => e.textContent);
       assert(ruList.includes('за 30 дней') && ruList.includes('не звучало 30 дней'), 'Russian list rendering: ' + ruList);
       await page.selectOption('#ui-locale', 'en');
       await page.waitForFunction(() => {
         const row = document.querySelector('tr[data-playlist-slug="e2e-relative"]');
-        return row && row.querySelectorAll('td')[5].textContent.includes('not within 30 days');
+        return row && row.querySelector('.summary').textContent.includes('not within 30 days');
       });
-      const enList = await page.$eval('tr[data-playlist-slug="e2e-relative"] td:nth-child(6)', (e) => e.textContent);
+      const enList = await page.$eval('tr[data-playlist-slug="e2e-relative"] .summary', (e) => e.textContent);
       assert(enList.includes('within 30 days') && enList.includes('not within 30 days'), 'English list rendering: ' + enList);
       assert(!enList.includes('N days') && !/30 d\b/.test(enList), 'English list day value duplicated: ' + enList);
       await page.goto(new URL('/edit/e2e-relative', page.url()).href, {waitUntil:'networkidle'});
