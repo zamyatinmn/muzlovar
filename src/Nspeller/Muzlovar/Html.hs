@@ -255,13 +255,11 @@ indexPage entries =
             ( th_ [class_ "artwork-cell", makeAttribute "aria-label" "Обложка"] mempty
                 <> th_ "Название"
                 <> th_ "Описание"
-                <> th_ "Файл"
                 <> th_ "Свойства"
                 <> th_ "Сортировка"
                 <> th_ "Дерево условий"
-                <> th_ "Статус"
                 <> th_ "Изменено"
-                <> th_ "Действия"
+                <> th_ [class_ "delete-cell"] mempty
             )
         )
 
@@ -270,25 +268,18 @@ indexPage entries =
     entryRow :: PlaylistEntry -> Html ()
     entryRow e =
       tr_
-        [makeAttribute "data-playlist-slug" (peSlug e)]
+        [makeAttribute "data-playlist-slug" (peSlug e), tabindex_ "0"]
         ( td_ [class_ "artwork-cell"]
             (if peArtwork e then img_ [class_ "list-artwork", alt_ "", src_ ("/api/playlists/" <> decodeUtf8 (urlEncode True (encodeUtf8 (peSlug e))) <> "/artwork"), makeAttribute "loading" "lazy"] else mempty)
             <> td_ [class_ "title"]
             (div_ [class_ "playlist-title-row"]
-              (span_ [class_ "playlist-title-text", makeAttribute "title" (peTitle e)] (toHtml (peTitle e))))
+              (a_ [class_ "playlist-title-text", href_ ("/edit/" <> decodeUtf8 (urlEncode True (encodeUtf8 (peSlug e)))), tabindex_ "-1", makeAttribute "title" (peTitle e)] (toHtml (peTitle e))))
             <> td_ [class_ "desc"] (toHtml (peDescription e))
-            <> td_
-              [class_ "file"]
-              ( maybe mempty toHtml (peMixFile e)
-                  <> br_ []
-                  <> maybe mempty toHtml (peNspFile e)
-              )
-            <> td_ properties
+            <> td_ [class_ "playlist-properties"] (properties <> status)
             <> td_ [class_ "playlist-sort"] (toHtml (peSort e))
             <> td_ [class_ "summary"] (toHtml (peSummary e))
-            <> td_ status
             <> td_ (toHtml (formatModified (peModified e)))
-            <> td_ [class_ "actions"] (div_ [class_ "actions-row"] actions)
+            <> td_ [class_ "delete-cell"] actions
         )
       where
         external = peStatus e == "external"
@@ -303,25 +294,21 @@ indexPage entries =
 
         status =
           mconcat
-            [ badge (peStatus e) (statusTitle (peStatus e))
+            [ if peStatus e `elem` ["managed", "draft"] then mempty else badge (peStatus e <> " playlist-status") (statusTitle (peStatus e))
             , maybe mempty (\err -> br_ [] <> span_ [class_ "badge broken"] (toHtml err)) (peError e)
             ]
 
-        -- Кнопки живут во вложенном div.actions-row: td.actions должна
-        -- оставаться table-cell (flex прямо на ячейке выносит её из
-        -- сетки таблицы), а gap бокса держит кнопки на расстоянии.
         actions =
-          mconcat
-            [ a_ [href_ ("/edit/" <> peSlug e), class_ "btn"] "Открыть"
-            , button_
+          button_
                 [ type_ "button"
-                , class_ "danger small"
+                , class_ "playlist-delete"
+                , makeAttribute "aria-label" "Удалить"
+                , makeAttribute "title" "Удалить"
                 , makeAttribute "data-delete" (peSlug e)
                 , makeAttribute "data-delete-name" (peTitle e)
                 , makeAttribute "data-external" (if external then "1" else "0")
                 ]
-                "Удалить"
-            ]
+                trashIcon
 
     statusTitle = \case
       "managed" -> "управляемая"
@@ -332,6 +319,11 @@ indexPage entries =
 
 badge :: Text -> Text -> Html ()
 badge cls label = span_ ([class_ ("badge " <> cls)] <> [makeAttribute "hidden" "hidden" | T.null label]) (toHtml label)
+
+trashIcon :: Html ()
+trashIcon = term "svg"
+  [makeAttribute "viewBox" "0 0 24 24", width_ "18", height_ "18", makeAttribute "aria-hidden" "true"]
+  (term "path" [makeAttribute "d" "M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v5M14 11v5", makeAttribute "fill" "none", makeAttribute "stroke" "currentColor", makeAttribute "stroke-width" "1.8", makeAttribute "stroke-linecap" "round", makeAttribute "stroke-linejoin" "round"] (mempty :: Html ()))
 
 ------------------------------------------------------------------------------
 -- Редактор
@@ -659,11 +651,6 @@ editorPage mslug publishedPath publishDir =
                   <> div_ [id_ "pl-meta", class_ "pl-meta"] "Лимит не задан"
               )
         )
-
-    trashIcon :: Html ()
-    trashIcon = term "svg"
-      [makeAttribute "viewBox" "0 0 24 24", width_ "18", height_ "18", makeAttribute "aria-hidden" "true"]
-      (term "path" [makeAttribute "d" "M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v5M14 11v5", makeAttribute "fill" "none", makeAttribute "stroke" "currentColor", makeAttribute "stroke-width" "1.8", makeAttribute "stroke-linecap" "round", makeAttribute "stroke-linejoin" "round"] (mempty :: Html ()))
 
     -- Деструктивное действие — в самом низу колонки (только если
     -- подборка опубликована).

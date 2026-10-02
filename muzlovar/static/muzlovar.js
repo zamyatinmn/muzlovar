@@ -2142,6 +2142,18 @@
 
   /* Строки списка: кнопки [data-delete] на серверной таблице. */
   function initList() {
+    document.querySelectorAll('.playlist-list tr[data-playlist-slug]').forEach(function (row) {
+      var link = row.querySelector('.playlist-title-text');
+      row.addEventListener('click', function (event) {
+        if (event.target.closest('a, button, input, select, textarea, [contenteditable], [role="button"]')) return;
+        window.location.assign(link.href);
+      });
+      row.addEventListener('keydown', function (event) {
+        if (event.target !== row || event.repeat || !['Enter', ' '].includes(event.key)) return;
+        event.preventDefault();
+        window.location.assign(link.href);
+      });
+    });
     if (artworkChannel) artworkChannel.onmessage = function (event) {
       updateListArtwork(event.data.slug, event.data.artwork);
     };
@@ -2157,7 +2169,8 @@
     window.addEventListener('pageshow', function (event) { if (event.persisted) refreshArtwork(); });
     document.addEventListener('visibilitychange', function () { if (!document.hidden) refreshArtwork(); });
     document.querySelectorAll('[data-delete]').forEach(function (btn) {
-      btn.addEventListener('click', function () {
+      btn.addEventListener('click', function (event) {
+        event.stopPropagation();
         var target = btn.getAttribute('data-delete');
         var name = btn.getAttribute('data-delete-name') || target;
         var external = btn.getAttribute('data-external') === '1';

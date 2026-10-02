@@ -998,6 +998,18 @@ table.list .actions { white-space: nowrap; }
 table.list .actions-row { display: flex; flex-wrap: wrap; gap: 6px; }
 table.list .actions .btn { height: 32px; padding: 0 11px; font-size: 13px; }
 
+.playlist-list tbody tr { cursor: pointer; }
+.playlist-list tbody tr:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.playlist-list tbody tr:focus-within td { background: var(--bg-raised); }
+.playlist-list .playlist-title-text { color: inherit; text-decoration: none; }
+.playlist-list .playlist-title-text:hover { text-decoration: underline; }
+.playlist-list .delete-cell { box-sizing: border-box; width: 52px; min-width: 52px; padding: 8px; text-align: center; vertical-align: middle; }
+.playlist-delete { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; color: var(--fg-dim); background: transparent; opacity: 0; transition: opacity .12s; }
+.playlist-list tr:hover .playlist-delete, .playlist-list tr:focus-within .playlist-delete { opacity: 1; }
+.playlist-delete:hover { color: var(--danger); }
+.playlist-delete:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (hover: none) { .playlist-delete { opacity: .6; } }
+
 .meta-line { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 13.5px; color: var(--fg-dim); }
 
 /* Палитра чипсов (старый стиль, совместимость). */

@@ -221,7 +221,7 @@ try {
     assert(uploaded.ok);
     await list.reload({waitUntil:'networkidle'});
     const after = await geometry();
-    assert.equal(after.headings,10);
+    assert.equal(after.headings,8);
     assert.equal(after.firstHeading,'');
     assert(Math.abs(after.cells[0].width-58)<1,'artwork column must stay 58px');
     assert(after.allTitleX.every(x => Math.abs(x-after.allTitleX[0])<1),'titles must align with and without artwork');
@@ -341,8 +341,67 @@ try {
   assert.deepEqual(readFileSync(artwork('draft-duplicate','png')),readFileSync(fixture('png')));
   assert.deepEqual(readFileSync(artwork('draft-success','png')),readFileSync(fixture('png')));
   console.log('  ✓ successful first publish and Save as new create matching sidecars without changing source bytes');
+
+  writeFileSync(path.join(store,'playlists/broken-list.nsp'),'invalid json');
+  writeFileSync(path.join(store,'rules/draft-only.mix'),readFileSync(path.join(store,'rules/draft-success.mix')));
+  await list.goto(base+'/',{waitUntil:'networkidle'});
+  await list.selectOption('#ui-locale','ru');
+  const rowSelector='tr[data-playlist-slug="draft-duplicate"]';
+  const deleteSelector=rowSelector+' .playlist-delete';
+  assert.deepEqual(await list.locator('.playlist-list thead th').allTextContents(),
+    ['', 'Название','Описание','Свойства','Сортировка','Дерево условий','Изменено','']);
+  assert.equal(await list.locator('.playlist-list .badge.managed, .playlist-list .file, .playlist-list .actions').count(),0);
+  assert.equal(await list.locator('.playlist-list a.btn').count(),0);
+  assert(await list.locator('tr[data-playlist-slug="external-artwork"] .badge.external').isVisible());
+  assert(await list.locator('tr[data-playlist-slug="broken-list"] .playlist-status.broken').isVisible());
+  assert(await list.locator('tr[data-playlist-slug="draft-only"] .badge.draft').isVisible());
+  await list.mouse.move(0,0);
+  await list.waitForFunction(selector => getComputedStyle(document.querySelector(selector)).opacity==='0',deleteSelector);
+  await list.hover(rowSelector);
+  await list.waitForFunction(selector => getComputedStyle(document.querySelector(selector)).opacity==='1',deleteSelector);
+  assert.equal(await list.locator(deleteSelector).getAttribute('aria-label'),'Удалить');
+  assert.equal(await list.locator(deleteSelector).getAttribute('title'),'Удалить');
+  assert.equal(await list.locator(deleteSelector+' svg').count(),1);
+  await list.mouse.move(0,0);
+  await list.locator(rowSelector).focus();
+  await list.waitForFunction(selector => getComputedStyle(document.querySelector(selector)).opacity==='1',deleteSelector);
+  await list.keyboard.press('Tab');
+  assert(await list.locator(deleteSelector).evaluate(node => document.activeElement===node));
+  console.log('  ✓ eight meaningful columns, attention statuses retained, hover and keyboard reveal SVG delete');
+
+  await Promise.all([list.waitForURL('**/edit/draft-duplicate'),list.click(rowSelector+' .summary')]);
+  for (const key of ['Enter','Space']) {
+    await list.goto(base+'/',{waitUntil:'networkidle'});
+    await list.locator(rowSelector).focus();
+    await Promise.all([list.waitForURL('**/edit/draft-duplicate'),list.keyboard.press(key)]);
+  }
+  console.log('  ✓ row click, Enter and Space open the correct editor');
+
+  await list.goto(base+'/',{waitUntil:'networkidle'});
+  await list.locator(rowSelector).focus();
+  await list.keyboard.press('Tab');
+  await list.keyboard.press('Enter');
+  await list.waitForSelector('#delete-dialog[open]');
+  assert.equal(new URL(list.url()).pathname,'/','delete keyboard action must not navigate');
+  assert(await list.locator('#delete-confirm').isDisabled());
+  await list.locator('#delete-dialog .row button:first-child').click();
+  await list.click(deleteSelector);
+  await list.waitForSelector('#delete-dialog[open]');
+  assert.equal(new URL(list.url()).pathname,'/','delete click must not navigate');
+  await list.fill('#delete-input','incorrect');
+  assert(await list.locator('#delete-confirm').isDisabled());
+  await list.fill('#delete-input','Draft Duplicate');
+  await Promise.all([list.waitForURL('**/trash'),list.click('#delete-confirm')]);
+  assert(!existsSync(artwork('draft-duplicate','nsp')));
+  assert(!existsSync(artwork('draft-duplicate','png')));
+  const restored=list.waitForResponse(r => r.url().includes('/restore') && r.request().method()==='POST');
+  await list.click('[data-restore]');
+  assert.equal((await restored).status(),200);
+  assert(existsSync(artwork('draft-duplicate','nsp')));
+  assert.deepEqual(readFileSync(artwork('draft-duplicate','png')),readFileSync(fixture('png')));
+  console.log('  ✓ mouse/keyboard delete never opens editor; exact-name confirmation and Trash restore preserved');
   assert.deepEqual(errors,[]);
-  console.log('[e2e-artwork] ALL PASSED (12)');
+  console.log('[e2e-artwork] ALL PASSED (15)');
 } finally {
   if (browser) await browser.close();
   server.kill();

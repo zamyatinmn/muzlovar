@@ -291,7 +291,7 @@ async function tableGrid(page) {
         box: rect(tr),
         cells: [...tr.children].map(rect),
         displays: [...tr.children].map((c) => getComputedStyle(c).display),
-        buttons: [...tr.querySelectorAll(".actions-row > *")].map((b) => ({
+        buttons: [...tr.querySelectorAll(".delete-cell > button")].map((b) => ({
           text: b.textContent.trim(),
           ...rect(b),
         })),
@@ -1077,7 +1077,7 @@ const pageLayoutScenarios = [
         const main = document.querySelector("main");
         main.scrollLeft = main.scrollWidth;
         await new Promise((r) => setTimeout(r, 150));
-        const cell = document.querySelector("table.list tbody tr .actions");
+        const cell = document.querySelector("table.list tbody tr .delete-cell");
         const r = cell.getBoundingClientRect();
         const f = document.querySelector("footer.app").getBoundingClientRect();
         return {
