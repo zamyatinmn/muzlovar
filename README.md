@@ -10,7 +10,7 @@ Muzlovar lets you build complex [Navidrome smart playlists](https://www.navidrom
 
 The browser edits a DTO; it does not contain a second playlist compiler. Muzlovar's server and the bundled **Nspeller** CLI both use the same Haskell field registry, typed AST, validation rules, renderer, and Navidrome model.
 
-**Language:** The Muzlovar web UI and Nspeller `.mix` DSL both support Russian and English. Choose the UI language in the header and the independent DSL language in the `.mix` preview; the browser saves explicit choices locally. Both dialects compile to identical `.nsp` output, and existing Russian recipes remain supported. The screenshot below shows the Russian interface.
+**Language:** The Muzlovar web UI and Nspeller `.mix` DSL both support Russian and English. Choose the UI language in the header and the independent DSL language in the `.mix` preview; the browser saves explicit choices locally. Both dialects compile to identical `.nsp` output, and existing Russian recipes remain supported. The screenshot below shows the English interface.
 
 ## Highlights
 
@@ -19,6 +19,7 @@ The browser edits a DTO; it does not contain a second playlist compiler. Muzlova
 - Rules for metadata, listening history, ratings, favourites, album and artist statistics, audio properties, identifiers, and playlist references.
 - Safe publishing with collision handling, atomic file replacement, persisted ownership checks, and rollback on write failure.
 - Rename, save-as-new, recoverable trash, restore, and permanent deletion workflows.
+- Playlist artwork with immediate previews, original-byte JPEG/PNG/WebP/GIF uploads, and Navidrome sidecar discovery.
 - Existing NSP files with unsupported nodes remain visible but are treated as read-only external playlists.
 - Optional Basic Auth and optional Subsonic integration for looking up and deleting the matching Navidrome playlist entity.
 - Multi-stage Docker image, a small non-root runtime, Haskell unit/golden/property/integration tests, and browser E2E tests.
@@ -93,13 +94,23 @@ Muzlovar is server-rendered HTML (Scotty + Lucid) with vanilla JavaScript and CS
 
 Muzlovar provides three main views:
 
-- **Playlists** lists `.mix` and `.nsp` files, metadata, rule summaries, publication state, modification time, and `managed`, `external`, or `broken` status.
-- **Editor** combines an ingredient palette, nested rule tree, sorting and limit controls, validation feedback, and live `.mix`/`.nsp` previews. Published playlists can be updated, renamed, or saved as a new playlist.
+- **Playlists** shows artwork, names, descriptions, properties, sorting, rule summaries, and modification times. Open a row by clicking it or focusing it and pressing Enter/Space. The compact delete action appears on hover or keyboard focus; external playlists, unpublished recipes, missing `.mix` files, and errors remain visible in Properties.
+- **Editor** combines an ingredient palette, nested rule tree, sorting and limit controls, validation feedback, artwork, and live `.mix`/`.nsp` previews. Published playlists can be updated, renamed, or saved as a new playlist.
 - **Trash** contains recoverable deletions and supports restore or permanent removal.
 
 Deletion moves managed files to Muzlovar's trash. It does not edit Navidrome's database directly. If all three Subsonic settings are present, Muzlovar can also call `deletePlaylist`; otherwise delete the imported playlist in Navidrome's UI if necessary.
 
 Personal fields such as favourites, ratings, play counts, and last-played dates are evaluated by Navidrome for the playlist owner. The same NSP may therefore produce different results for different owners.
+
+### Playlist artwork
+
+Click the square artwork area to add or replace an image; use its corner trash button to remove it. Both the large artwork preview and the compact playlist preview show a local selection immediately when creating a new playlist. The File stays in the editor until the first successful publication, then uploads under the final playlist basename. Failed publication retains the selection; if only the artwork upload fails, the playlist stays published and an inline retry action is available. Local selections are lost on page reload.
+
+For an existing playlist, choosing or replacing artwork uploads it immediately, and removal immediately deletes the sidecar. Recipe saving does not save artwork separately. Save as new copies the cover to the new playlist; rename, Trash, and restore carry the artwork along with the playlist.
+
+JPEG (`.jpg`, `.jpeg`), PNG, WebP, and GIF are supported up to **10 MiB (10,485,760 bytes)**. Actual image content is validated rather than trusting the filename or client MIME type. Original bytes are preserved without resizing, cropping, or re-encoding; GIF playback uses the browser's native support.
+
+Artwork is a sidecar next to the `.nsp`, for example `playlist.nsp` and `playlist.png`. Manually placed sidecars are discovered automatically. Replacing an image removes previous supported sidecars with the same basename. No artwork path is added to `.nsp`, and no Navidrome API call or forced rescan is needed. See the [artwork API and storage details](docs/muzlovar-artwork.md).
 
 ## Configuration
 
@@ -213,6 +224,9 @@ Generated NSP is ordinary JSON with no comments. Optional keys are omitted when 
 - `POST /api/playlists` — publish a new playlist.
 - `PUT /api/playlists/:slug[?overwrite=1]` — update or rename a managed playlist.
 - `DELETE /api/playlists/:slug` — move a managed playlist to trash.
+- `GET /api/playlists/:slug/artwork` — original sidecar bytes with the detected image content type.
+- `PUT /api/playlists/:slug/artwork` — upload raw supported image bytes, up to 10 MiB; requires an existing `.nsp`.
+- `DELETE /api/playlists/:slug/artwork` — remove this playlist's supported sidecars.
 - `GET /api/trash`, `POST /api/trash/:id/restore`, `DELETE /api/trash/:id` — trash lifecycle.
 - `GET /health` — public liveness check.
 
@@ -235,6 +249,7 @@ npm ci
 npm test
 npm run test:publish-rename
 npm run test:save-as-new
+npm run test:artwork
 ```
 
 Set `MUZLOVAR_E2E_CHROME` to a browser executable when it cannot be discovered automatically. Set `MUZLOVAR_E2E_SKIP_BUILD=1` to reuse an already-built `muzlovar` binary.
