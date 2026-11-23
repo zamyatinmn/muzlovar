@@ -49,15 +49,15 @@ Open <http://localhost:8765>. The default Compose file pulls `ghcr.io/zamyatinmn
 
 Authentication is disabled in the zero-config setup. Keep the service on a trusted network, or create a `.env` from [`.env.example`](.env.example) and set both `MUZLOVAR_USERNAME` and `MUZLOVAR_PASSWORD` before exposing it through a reverse proxy.
 
-To make published playlists visible to Navidrome, mount the same `muzlovar_playlists` volume at Navidrome's `PlaylistsPath`, or replace that named volume with a bind mount to your existing playlist directory. The container runs as UID `10001`, so a bind-mounted host directory must be writable by that UID.
+To make published playlists visible to Navidrome, mount the `muzlovar_playlists` volume **inside Navidrome's music library**. The example below assumes that Navidrome's `MusicFolder` is `/music`: the volume is mounted at `/music/playlists`, and `ND_PLAYLISTSPATH` is `playlists` (relative to `MusicFolder`, not an absolute path). Add this mount alongside your existing Navidrome music volume, without replacing it. If your `MusicFolder` is different, adjust the mount target accordingly. You can also use a bind mount for a playlist directory inside the music library. The Muzlovar container runs as UID `10001`, so a bind-mounted host directory must be writable by that UID.
 
 ```yaml
 services:
   navidrome:
     volumes:
-      - muzlovar_playlists:/playlists
+      - muzlovar_playlists:/music/playlists
     environment:
-      ND_PLAYLISTSPATH: /playlists
+      ND_PLAYLISTSPATH: playlists
 
 volumes:
   muzlovar_playlists:
