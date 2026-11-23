@@ -54,15 +54,15 @@ docker compose up -d
 
 Без дополнительных настроек авторизация выключена. Если сервис будет доступен вне доверенной сети, скопируйте [`.env.example`](.env.example) в `.env`, задайте оба значения `MUZLOVAR_USERNAME` и `MUZLOVAR_PASSWORD` и используйте reverse proxy с HTTPS.
 
-Чтобы Navidrome увидел опубликованные подборки, подключите том `muzlovar_playlists` к его `PlaylistsPath` либо замените именованный том в Compose на bind mount существующего каталога подборок. Контейнер работает от UID `10001`: при bind mount этот пользователь должен иметь право записи в каталог.
+Чтобы Navidrome увидел опубликованные подборки, подключите том `muzlovar_playlists` **внутри музыкальной библиотеки Navidrome**. В примере `MusicFolder` равен `/music`: том монтируется в `/music/playlists`, а `ND_PLAYLISTSPATH` задаётся как `playlists` — относительно `MusicFolder`, не абсолютным путём. Добавьте это монтирование к существующим томам Navidrome, не заменяя том с музыкой. Если `MusicFolder` отличается, скорректируйте путь монтирования. Вместо именованного тома можно использовать bind mount каталога подборок внутри музыкальной библиотеки. Контейнер Музловара работает от UID `10001`: при bind mount у него должны быть права записи в каталог.
 
 ```yaml
 services:
   navidrome:
     volumes:
-      - muzlovar_playlists:/playlists
+      - muzlovar_playlists:/music/playlists
     environment:
-      ND_PLAYLISTSPATH: /playlists
+      ND_PLAYLISTSPATH: playlists
 
 volumes:
   muzlovar_playlists:
